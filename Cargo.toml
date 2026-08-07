@@ -1,0 +1,14 @@
+[package]
+name = "wl-wysiwyc"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Keyboard-driven window clicking for Hyprland"
+
+[dependencies]
+fontdue = "0.9"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+smithay-client-toolkit = "0.19"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
