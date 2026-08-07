@@ -1,5 +1,7 @@
+mod atspi;
 mod draw;
 mod grid;
+mod hint;
 mod hypr;
 mod overlay;
 
@@ -10,12 +12,18 @@ const USAGE: &str = "\
 wl-wysiwyc: keyboard-driven window clicking for Hyprland
 
 Usage:
-  wl-wysiwyc                 interactive: pick a window by number (1-9),
-                             then a spot by letter (a-z), Esc goes back
+  wl-wysiwyc                 interactive: pick a window by number (1-9), then
+                             type the hint of a clickable element; Space
+                             switches to the qwerty letter grid, Esc goes back
   wl-wysiwyc --list          print the windows that would be shown
+  wl-wysiwyc --elements N    print the clickable elements detected for
+                             window N (debugging aid)
   wl-wysiwyc --smoke MS [N]  render the overlay for MS milliseconds without
                              grabbing the keyboard; with N, show the letter
                              grid for window N instead (debugging aid)
+  wl-wysiwyc --smoke-hints MS N
+                             like --smoke but shows the element hints for
+                             window N (debugging aid)
   wl-wysiwyc --move-test X Y move the cursor to global (X, Y) through the
                              virtual pointer, no click (debugging aid)
   wl-wysiwyc --help          show this help
@@ -33,6 +41,10 @@ fn run() -> Result<(), Box<dyn Error>> {
     match args.first().map(String::as_str) {
         None => interactive(None),
         Some("--list") => list(),
+        Some("--elements") => {
+            let n: usize = args.get(1).ok_or("--elements needs a window number")?.parse()?;
+            elements(n)
+        }
         Some("--smoke") => {
             let ms: u64 = args
                 .get(1)
@@ -45,6 +57,22 @@ fn run() -> Result<(), Box<dyn Error>> {
             interactive(Some(overlay::Smoke {
                 duration: Duration::from_millis(ms),
                 grid_window: stage_win,
+                hints_window: None,
+            }))
+        }
+        Some("--smoke-hints") => {
+            let ms: u64 = args
+                .get(1)
+                .ok_or("--smoke-hints needs a duration in milliseconds")?
+                .parse()?;
+            let n: usize = args
+                .get(2)
+                .ok_or("--smoke-hints needs a window number")?
+                .parse()?;
+            interactive(Some(overlay::Smoke {
+                duration: Duration::from_millis(ms),
+                grid_window: None,
+                hints_window: Some(n),
             }))
         }
         Some("--move-test") => {
@@ -82,6 +110,28 @@ fn list() -> Result<(), Box<dyn Error>> {
             w.h,
             w.class,
             w.title
+        );
+    }
+    Ok(())
+}
+
+fn elements(n: usize) -> Result<(), Box<dyn Error>> {
+    let snap = hypr::snapshot()?;
+    let w = snap
+        .windows
+        .get(n.checked_sub(1).ok_or("window numbers start at 1")?)
+        .ok_or("no such window; see --list")?;
+    println!("window {}: [{}] {}", n, w.class, w.title);
+    let els = atspi::clickable_elements(w.pid, &w.title)?;
+    println!("{} clickable elements (window-relative logical):", els.len());
+    for e in &els {
+        println!(
+            "  {:16} at ({:.0}, {:.0}) size {:.0}x{:.0}",
+            atspi::role_name(e.role),
+            e.x,
+            e.y,
+            e.w,
+            e.h
         );
     }
     Ok(())

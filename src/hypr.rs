@@ -34,6 +34,7 @@ struct ClientJson {
     workspace: WorkspaceRef,
     class: String,
     title: String,
+    pid: i32,
 }
 
 fn default_true() -> bool {
@@ -54,6 +55,7 @@ pub struct Monitor {
 pub struct Window {
     pub class: String,
     pub title: String,
+    pub pid: i32,
     pub x: i32,
     pub y: i32,
     pub w: i32,
@@ -134,6 +136,7 @@ pub fn snapshot() -> Result<Snapshot, Box<dyn Error>> {
         .map(|c| Window {
             class: c.class,
             title: c.title,
+            pid: c.pid,
             x: c.at[0],
             y: c.at[1],
             w: c.size[0],

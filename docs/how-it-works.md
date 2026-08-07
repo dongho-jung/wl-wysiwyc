@@ -1,6 +1,8 @@
 # How it works
 
-The tool runs in three steps: snapshot, overlay, click.
+The tool runs in three steps: snapshot, overlay, click. Stage two of
+the overlay has two modes: element hints (preferred) and the letter
+grid (fallback).
 
 ## Snapshot
 
@@ -9,8 +11,8 @@ clients`. It keeps windows that are mapped, not hidden, visible (this
 drops inactive tabs of a Hyprland group), and on the active workspace
 of the focused monitor. Windows are sorted top-to-bottom then
 left-to-right and capped at nine, since selection keys are 1-9. The
-snapshot also records the focused monitor's logical geometry and the
-bounding box of the whole output layout.
+snapshot also records each window's pid, the focused monitor's logical
+geometry, and the bounding box of the whole output layout.
 
 ## Overlay
 
@@ -25,15 +27,77 @@ at an integer scale of ceil(monitor scale) so text stays sharp on
 fractional-scale outputs.
 
 Stage one draws a numbered label on every window. Pressing a digit
-switches to stage two, which divides the chosen window into three rows
-following the qwerty layout (`src/grid.rs`): ten tiles for q-p, nine
-for a-l, seven for z-m. Esc returns to stage one, and Esc again quits.
+queries the window's clickable elements over AT-SPI (1.8 s hard
+timeout, results cached per window). If elements are found the overlay
+enters hint mode; otherwise it falls back to the grid.
+
+### Hint mode
+
+Every clickable element gets an amber label (`src/hint.rs`): single
+letters while 26 suffice, uniform two-letter combinations beyond that,
+home row first. Typing narrows the visible hints; completing a label
+clicks the center of that element. Backspace edits the typed prefix,
+Esc clears it (then returns to the window picker), Space switches to
+the grid for spots the tree does not cover.
+
+### Grid mode
+
+The window is divided into three rows following the qwerty layout
+(`src/grid.rs`): ten tiles for q-p, nine for a-l, seven for z-m. One
+letter clicks that tile's center. Space switches back to hint mode
+when elements exist.
+
+## Element discovery (AT-SPI)
+
+`src/atspi.rs` talks to the accessibility bus directly over zbus:
+
+1. Ask `org.a11y.Bus` on the session bus for the a11y bus address and
+   connect to it.
+2. List applications from the registry root and match the window by
+   comparing each connection's `GetConnectionUnixProcessID` against the
+   window's pid from Hyprland.
+3. Pick the frame whose accessible name equals the window title (falls
+   back to the first frame).
+4. Breadth-first walk: prune subtrees whose root lacks the SHOWING
+   state, collect nodes whose role is interactive (button, link, entry,
+   check box, combo box, menu item, tab, slider, list item, and so on)
+   and SENSITIVE, and read their extents in window coordinates.
+   Budgets: 4000 nodes, 400 elements, 1.2 s.
+5. Coordinate correction: toolkits report window-relative coordinates
+   under Wayland (they do not know their global position), so the
+   window's global position from Hyprland is added afterwards. Chromium
+   additionally reports web-content extents in physical pixels while
+   its browser UI uses logical pixels; at each `document web` node the
+   ratio of its extents to its parent's is divided back out of every
+   descendant.
+
+Measured on this setup: a small page yields 17 elements in about 0.1 s,
+the GeekNews front page 57 elements in about 0.1 s.
+
+## System setup required for hints
+
+- GTK and Qt applications publish their trees when the desktop
+  advertises an assistive technology:
+  `gsettings set org.gnome.desktop.interface toolkit-accessibility true`
+  and
+  `gsettings set org.gnome.desktop.a11y.applications screen-reader-enabled true`.
+  GTK generally registers even without them; Qt reads them at startup.
+- Chromium ignores those signals (verified on Chromium 150) and needs
+  `--force-renderer-accessibility`, easiest as a line in
+  `~/.config/chromium-flags.conf`. Already-running instances need a
+  restart to pick it up.
+- Electron apps bundle their own Chromium and do not read
+  chromium-flags.conf; they need the same flag passed by their own
+  launcher wrapper.
+- Applications that draw their own UI (kitty and other GPU terminals,
+  mpv, games) have no accessibility tree at all; the grid fallback
+  covers them.
 
 ## Click
 
-Pressing a letter records the center of that tile in global logical
-coordinates, tears down the overlay (so the click cannot land on the
-overlay itself), and injects the click through
+The chosen point (tile center or element center) is recorded in global
+logical coordinates, the overlay is torn down (so the click cannot land
+on the overlay itself), and the click is injected through
 `zwlr_virtual_pointer_v1`: absolute motion scaled to the output layout
 extent, then a left button press and release.
 
@@ -41,9 +105,12 @@ extent, then a left button press and release.
 
 - `--list` prints the snapshot: monitor, layout extent, and the
   windows with their geometry.
+- `--elements N` prints the clickable elements detected for window N
+  with roles and window-relative rectangles.
 - `--smoke MS [N]` renders the overlay for MS milliseconds without
   grabbing the keyboard. With N it shows the letter grid for window N.
-  Useful for screenshots and render checks.
+- `--smoke-hints MS N` is like `--smoke` but queries and shows the
+  element hints for window N.
 - `--move-test X Y` moves the cursor to global (X, Y) through the
   virtual pointer without clicking. Verifies coordinate mapping.
 
@@ -53,7 +120,8 @@ extent, then a left button press and release.
   compositors would need their own snapshot source.
 - Only the focused monitor's active workspace is shown. Special
   (scratchpad) workspaces and pinned windows are not handled.
-- One click precision level: 26 tiles per window, no refinement stage.
+- Hint clicks target the element center; elements overlapped by
+  something else (sticky headers, popovers) can be misclicked.
 - Left click only, and the cursor stays where the click happened.
 - Monitors left of or above the origin (negative layout coordinates)
   are not supported.

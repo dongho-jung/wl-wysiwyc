@@ -76,7 +76,7 @@ impl Canvas<'_> {
     }
 
     pub fn text_centered(&mut self, font: &Font, text: &str, cx: f32, cy: f32, px: f32, c: Color) {
-        let total: f32 = text.chars().map(|ch| font.metrics(ch, px).advance_width).sum();
+        let total = text_width(font, text, px);
         let baseline = match font.horizontal_line_metrics(px) {
             Some(lm) => cy + (lm.ascent + lm.descent) / 2.0,
             None => cy + px * 0.35,
@@ -97,6 +97,10 @@ impl Canvas<'_> {
             pen += m.advance_width;
         }
     }
+}
+
+pub fn text_width(font: &Font, text: &str, px: f32) -> f32 {
+    text.chars().map(|ch| font.metrics(ch, px).advance_width).sum()
 }
 
 pub fn load_font() -> Result<Font, Box<dyn Error>> {

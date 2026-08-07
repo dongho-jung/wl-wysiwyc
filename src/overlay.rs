@@ -1,7 +1,10 @@
+use crate::atspi::{self, Element};
 use crate::draw::{self, Canvas, Color};
 use crate::grid;
+use crate::hint;
 use crate::hypr::Snapshot;
 use fontdue::Font;
+use std::collections::HashMap;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_registry,
@@ -42,18 +45,39 @@ const BOX_BORDER: Color = Color::new(1.0, 1.0, 1.0, 0.85);
 const TEXT: Color = Color::new(1.0, 1.0, 1.0, 0.95);
 const TILE_BG: Color = Color::new(0.08, 0.08, 0.10, 0.28);
 const TILE_BORDER: Color = Color::new(1.0, 1.0, 1.0, 0.45);
+const HINT_BG: Color = Color::new(0.99, 0.76, 0.16, 0.96);
+const HINT_EDGE: Color = Color::new(0.35, 0.24, 0.02, 0.9);
+const HINT_TEXT: Color = Color::new(0.12, 0.08, 0.0, 1.0);
+const HINT_RING: Color = Color::new(1.0, 0.85, 0.3, 0.5);
 
 pub struct Smoke {
     pub duration: Duration,
     /// 1-based window index; when set, render the letter grid for that
     /// window instead of the window picker.
     pub grid_window: Option<usize>,
+    /// 1-based window index; when set, query clickable elements and render
+    /// the hint overlay for that window.
+    pub hints_window: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
+#[allow(clippy::enum_variant_names)]
 enum Stage {
     PickWindow,
     PickTile { win: usize },
+    PickHint { win: usize },
+}
+
+#[derive(Clone)]
+struct Hint {
+    label: String,
+    /// Element rectangle and click center, global logical coordinates.
+    rx: f64,
+    ry: f64,
+    rw: f64,
+    rh: f64,
+    cx: f64,
+    cy: f64,
 }
 
 struct App {
@@ -74,6 +98,10 @@ struct App {
     stage: Stage,
     exit: bool,
     target: Option<(f64, f64)>,
+    hints: Vec<Hint>,
+    typed: String,
+    elements_cache: HashMap<usize, Vec<Element>>,
+    pending_pick: Option<usize>,
 }
 
 /// Show the overlay and return the chosen global click position, or None
@@ -115,11 +143,22 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         stage,
         exit: false,
         target: None,
+        hints: Vec::new(),
+        typed: String::new(),
+        elements_cache: HashMap::new(),
+        pending_pick: None,
     };
 
     // Output names arrive with the initial burst of globals metadata.
     queue.roundtrip(&mut app)?;
     let output = app.find_output();
+
+    if let Some(n) = smoke.as_ref().and_then(|s| s.hints_window) {
+        if (1..=app.snap.windows.len()).contains(&n) {
+            app.pending_pick = Some(n - 1);
+            app.process_pending_pick();
+        }
+    }
 
     let surface = compositor.create_surface(&qh);
     let layer = layer_shell.create_layer_surface(
@@ -152,6 +191,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
     } else {
         while !app.exit {
             queue.blocking_dispatch(&mut app)?;
+            app.process_pending_pick();
             if app.configured && app.dirty {
                 app.draw();
             }
@@ -247,11 +287,22 @@ impl App {
     fn handle_key(&mut self, event: KeyEvent) {
         if event.keysym == Keysym::Escape {
             match self.stage {
-                Stage::PickTile { .. } => {
+                Stage::PickHint { .. } if !self.typed.is_empty() => {
+                    self.typed.clear();
+                    self.dirty = true;
+                }
+                Stage::PickTile { .. } | Stage::PickHint { .. } => {
                     self.stage = Stage::PickWindow;
+                    self.typed.clear();
                     self.dirty = true;
                 }
                 Stage::PickWindow => self.exit = true,
+            }
+            return;
+        }
+        if event.keysym == Keysym::BackSpace {
+            if matches!(self.stage, Stage::PickHint { .. }) && self.typed.pop().is_some() {
+                self.dirty = true;
             }
             return;
         }
@@ -264,12 +315,17 @@ impl App {
                 if let Some(d) = ch.to_digit(10) {
                     let idx = d as usize;
                     if (1..=self.snap.windows.len()).contains(&idx) {
-                        self.stage = Stage::PickTile { win: idx - 1 };
-                        self.dirty = true;
+                        self.pending_pick = Some(idx - 1);
                     }
                 }
             }
             Stage::PickTile { win } => {
+                if ch == ' ' {
+                    if !self.elements_cache.get(&win).is_none_or(Vec::is_empty) {
+                        self.enter_hint_stage(win);
+                    }
+                    return;
+                }
                 if ch.is_ascii_lowercase() {
                     let w = &self.snap.windows[win];
                     if let Some(t) = grid::tile_for(w.w as f64, w.h as f64, ch) {
@@ -279,7 +335,96 @@ impl App {
                     }
                 }
             }
+            Stage::PickHint { win } => {
+                if ch == ' ' {
+                    self.stage = Stage::PickTile { win };
+                    self.typed.clear();
+                    self.dirty = true;
+                    return;
+                }
+                if !ch.is_ascii_lowercase() {
+                    return;
+                }
+                self.typed.push(ch);
+                let mut prefix_matches = 0;
+                let mut exact: Option<(f64, f64)> = None;
+                for h in &self.hints {
+                    if h.label.starts_with(&self.typed) {
+                        prefix_matches += 1;
+                        if h.label == self.typed {
+                            exact = Some((h.cx, h.cy));
+                        }
+                    }
+                }
+                if let Some(t) = exact {
+                    self.target = Some(t);
+                    self.exit = true;
+                } else if prefix_matches == 0 {
+                    self.typed.clear();
+                    self.dirty = true;
+                } else {
+                    self.dirty = true;
+                }
+            }
         }
+    }
+
+    /// A window was picked: query its clickable elements (with a hard timeout
+    /// so a stuck application cannot wedge the overlay) and enter hint mode,
+    /// or fall back to the letter grid when nothing is found.
+    fn process_pending_pick(&mut self) {
+        let Some(win) = self.pending_pick.take() else {
+            return;
+        };
+        if !self.elements_cache.contains_key(&win) {
+            let w = &self.snap.windows[win];
+            let (pid, title) = (w.pid, w.title.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(atspi::clickable_elements(pid, &title).map_err(|e| e.to_string()));
+            });
+            let els = match rx.recv_timeout(Duration::from_millis(1800)) {
+                Ok(Ok(v)) => v,
+                Ok(Err(e)) => {
+                    eprintln!("atspi: {e}");
+                    Vec::new()
+                }
+                Err(_) => {
+                    eprintln!("atspi: element query timed out");
+                    Vec::new()
+                }
+            };
+            self.elements_cache.insert(win, els);
+        }
+        if self.elements_cache.get(&win).is_none_or(Vec::is_empty) {
+            self.stage = Stage::PickTile { win };
+            self.typed.clear();
+            self.dirty = true;
+        } else {
+            self.enter_hint_stage(win);
+        }
+    }
+
+    fn enter_hint_stage(&mut self, win: usize) {
+        let els = self.elements_cache.get(&win).cloned().unwrap_or_default();
+        let w = &self.snap.windows[win];
+        let labels = hint::labels(els.len());
+        self.hints = els
+            .iter()
+            .zip(labels)
+            .map(|(e, label)| Hint {
+                label,
+                rx: w.x as f64 + e.x,
+                ry: w.y as f64 + e.y,
+                rw: e.w,
+                rh: e.h,
+                cx: w.x as f64 + e.x + e.w / 2.0,
+                cy: w.y as f64 + e.y + e.h / 2.0,
+            })
+            .collect();
+        self.typed.clear();
+        self.stage = Stage::PickHint { win };
+        self.dirty = true;
     }
 
     fn draw(&mut self) {
@@ -308,6 +453,15 @@ impl App {
             Stage::PickTile { win } => {
                 draw_pick_tile(&self.snap, win, &self.font, &mut canvas, scale)
             }
+            Stage::PickHint { win } => draw_pick_hint(
+                &self.snap,
+                win,
+                &self.hints,
+                &self.typed,
+                &self.font,
+                &mut canvas,
+                scale,
+            ),
         }
         let surface = layer.wl_surface();
         surface.set_buffer_scale(scale);
@@ -366,6 +520,54 @@ fn draw_pick_tile(snap: &Snapshot, win: usize, font: &Font, canvas: &mut Canvas,
             ty as f32 + th as f32 / 2.0,
             px,
             TEXT,
+        );
+    }
+}
+
+fn draw_pick_hint(
+    snap: &Snapshot,
+    win: usize,
+    hints: &[Hint],
+    typed: &str,
+    font: &Font,
+    canvas: &mut Canvas,
+    scale: i32,
+) {
+    let mon = &snap.monitor;
+    let w = &snap.windows[win];
+    canvas.stroke_rect(
+        (w.x - mon.x) * scale,
+        (w.y - mon.y) * scale,
+        w.w * scale,
+        w.h * scale,
+        2 * scale,
+        TILE_BORDER,
+    );
+    let px = 15.0 * scale as f32;
+    let pad = 4 * scale;
+    for h in hints {
+        if !h.label.starts_with(typed) {
+            continue;
+        }
+        let ex = ((h.rx - mon.x as f64) * scale as f64) as i32;
+        let ey = ((h.ry - mon.y as f64) * scale as f64) as i32;
+        let ew = (h.rw * scale as f64) as i32;
+        let eh = (h.rh * scale as f64) as i32;
+        canvas.stroke_rect(ex, ey, ew, eh, scale.max(1), HINT_RING);
+        let rem = h.label[typed.len()..].to_ascii_uppercase();
+        let bw = draw::text_width(font, &rem, px) as i32 + 2 * pad;
+        let bh = px as i32 + 2 * pad;
+        let bx = ex.clamp(0, (canvas.w - bw).max(0));
+        let by = (ey - bh / 2).clamp(0, (canvas.h - bh).max(0));
+        canvas.fill_rect(bx, by, bw, bh, HINT_BG);
+        canvas.stroke_rect(bx, by, bw, bh, scale.max(1), HINT_EDGE);
+        canvas.text_centered(
+            font,
+            &rem,
+            bx as f32 + bw as f32 / 2.0,
+            by as f32 + bh as f32 / 2.0,
+            px,
+            HINT_TEXT,
         );
     }
 }
