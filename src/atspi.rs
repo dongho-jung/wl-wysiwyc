@@ -280,8 +280,7 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
                     w as f64 / ratio,
                     h as f64 / ratio,
                 );
-                let on_screen =
-                    ex + ew > 0.0 && ey + eh > 0.0 && ex < frame_w && ey < frame_h;
+                let on_screen = ex + ew > 0.0 && ey + eh > 0.0 && ex < frame_w && ey < frame_h;
                 if ew >= 3.0 && eh >= 3.0 && on_screen {
                     let key = (ex as i32, ey as i32, ew as i32, eh as i32, role);
                     if seen_rects.insert(key) {

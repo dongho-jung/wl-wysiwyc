@@ -189,7 +189,9 @@ pub fn baseline(font: &Font, cy: f32, px: f32) -> f32 {
 }
 
 pub fn text_width(font: &Font, text: &str, px: f32) -> f32 {
-    text.chars().map(|ch| font.metrics(ch, px).advance_width).sum()
+    text.chars()
+        .map(|ch| font.metrics(ch, px).advance_width)
+        .sum()
 }
 
 pub fn load_font() -> Result<Font, Box<dyn Error>> {
