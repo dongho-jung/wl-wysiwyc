@@ -85,9 +85,10 @@ No key press commits on the way down. The first press of a key arms it:
 whatever that key would select turns green and the rest steps back.
 Pressing the same key again, or Enter, confirms it, and confirming the
 last key of a hint clicks that element. An armed key also confirms
-itself once it has been waiting 300 ms, so the second press is a
-shortcut past the wait rather than a toll on every key. Backspace undoes
-one press, and a key that leads nowhere is ignored.
+itself once it has been waiting `confirm_ms` (300 by default), so the
+second press is a shortcut past the wait rather than a toll on every
+key. Backspace undoes one press, and a key that leads nowhere is
+ignored.
 
 Typing on has the same effect as waiting: a key that would only narrow
 the field is confirmed by the next key, so a two-key hint typed at speed

@@ -16,3 +16,4 @@ wayland-client = "0.31"
 wayland-scanner = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 zbus = "5"
+serde_yaml = "0.9.34"

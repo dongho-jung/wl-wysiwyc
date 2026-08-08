@@ -25,6 +25,10 @@ An armed key also confirms itself after a moment, so the second press is
 a shortcut rather than a toll. `Ctrl+Esc` always gets the keyboard back
 if a run is killed before it can tidy up.
 
+Colours, label sizing, the confirm delay, and the limits on reading a
+window are set in `~/.config/wl-wysiwyc/config.yaml`, which is optional:
+see [docs/configuration.md](docs/configuration.md).
+
 Element hints need AT-SPI accessibility enabled on the system; Chromium
 additionally needs a launch flag. See
 [docs/how-it-works.md](docs/how-it-works.md) for setup, internals,

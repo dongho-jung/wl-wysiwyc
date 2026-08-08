@@ -1,4 +1,5 @@
 use crate::atspi::{self, Element};
+use crate::config;
 use crate::draw::{self, Canvas, Color, Rect};
 use crate::grid;
 use crate::hint;
@@ -9,7 +10,6 @@ use crate::shortcuts::{
     Key, Shortcuts,
 };
 use fontdue::Font;
-use std::collections::HashMap;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_registry,
@@ -30,6 +30,7 @@ use smithay_client_toolkit::{
     },
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
+use std::collections::HashMap;
 use std::error::Error;
 use std::io::ErrorKind;
 use std::time::{Duration, Instant};
@@ -48,43 +49,32 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
 
 const BTN_LEFT: u32 = 0x110;
 
-const DIM: Color = Color::new(0.0, 0.0, 0.0, 0.28);
-const SHADOW: Color = Color::new(0.0, 0.0, 0.0, 0.42);
-const BOX_BG: Color = Color::new(0.09, 0.09, 0.12, 0.86);
-const BOX_BORDER: Color = Color::new(1.0, 1.0, 1.0, 0.55);
-const TEXT: Color = Color::new(1.0, 1.0, 1.0, 0.96);
-const TILE_BG: Color = Color::new(0.08, 0.08, 0.10, 0.20);
-const TILE_BORDER: Color = Color::new(1.0, 1.0, 1.0, 0.30);
-const HINT_BG: Color = Color::new(0.98, 0.79, 0.29, 0.97);
-const HINT_EDGE: Color = Color::new(0.30, 0.20, 0.01, 0.35);
-const HINT_TEXT: Color = Color::new(0.14, 0.09, 0.0, 1.0);
-const HINT_RING: Color = Color::new(1.0, 0.85, 0.35, 0.5);
-/// The armed target, one key press away from being confirmed.
-const ARMED_BG: Color = Color::new(0.24, 0.85, 0.60, 0.98);
-const ARMED_EDGE: Color = Color::new(0.02, 0.26, 0.16, 0.55);
-const ARMED_TEXT: Color = Color::new(0.0, 0.14, 0.08, 1.0);
-const ARMED_RING: Color = Color::new(0.25, 0.92, 0.63, 0.95);
-const ARMED_GLOW: Color = Color::new(0.25, 0.92, 0.63, 0.5);
-const ARMED_FILL: Color = Color::new(0.24, 0.85, 0.60, 0.14);
-/// The armed key itself, shown pressed inside the labels it keeps.
-const ARMED_CAP: Color = Color::new(0.02, 0.24, 0.15, 0.92);
-const ARMED_CAP_TEXT: Color = Color::new(0.55, 1.0, 0.82, 1.0);
+/// Colours the config does not name, because they are shades of ones it
+/// does: the darker edge of a label, the wash and glow around an armed
+/// target, and the panel behind a window number.
+fn hint_edge() -> Color {
+    shade(*config::get().colors.hint_text, 0.35)
+}
+fn armed_edge() -> Color {
+    shade(*config::get().colors.armed_text, 0.55)
+}
+fn armed_glow() -> Color {
+    shade(*config::get().colors.ring, 0.5)
+}
+fn armed_fill() -> Color {
+    shade(*config::get().colors.armed, 0.14)
+}
+fn box_bg() -> Color {
+    Color::new(0.09, 0.09, 0.12, 0.86)
+}
+fn box_border() -> Color {
+    shade(*config::get().colors.text, 0.55)
+}
 
-/// How long an armed key waits before confirming itself. Long enough to see
-/// what it selected and press something else instead, short enough that the
-/// second press is a shortcut rather than the only way through.
-const AUTO_CONFIRM: Duration = Duration::from_millis(300);
-
-/// Label text size and the space around it, both in unscaled pixels.
-const LABEL_PX: f32 = 11.5;
-const LABEL_PAD_X: f32 = 4.5;
-const LABEL_PAD_Y: f32 = 3.0;
-/// Clearance between two labels, so a crowded window reads as separate
-/// labels rather than one block of colour.
-const LABEL_GAP: i32 = 3;
-/// Space between the characters of a label, so the pressed key wears its
-/// cap without touching the character next to it.
-const LABEL_TRACK: f32 = 2.5;
+/// The same colour at a set opacity, whatever the original had.
+fn shade(c: Color, a: f32) -> Color {
+    Color::new(c.r, c.g, c.b, a)
+}
 
 /// What a smoke run should render. The window index is 1-based; None means
 /// the focused window, the same one the overlay starts on.
@@ -358,7 +348,14 @@ pub fn move_only(snap: &Snapshot, target: (f64, f64)) -> Result<(), Box<dyn Erro
         .map_err(|_| "compositor does not expose zwlr_virtual_pointer_manager_v1")?;
     let vp = mgr.create_virtual_pointer(None, &qh, ());
     let mut mini = Mini;
-    move_and_click(&vp, target, snap.layout_extent, false, &mut queue, &mut mini)?;
+    move_and_click(
+        &vp,
+        target,
+        snap.layout_extent,
+        false,
+        &mut queue,
+        &mut mini,
+    )?;
     vp.destroy();
     queue.roundtrip(&mut mini)?;
     Ok(())
@@ -485,15 +482,18 @@ impl App {
     /// Confirm an armed key that has been waiting long enough. This is what
     /// makes the second press optional.
     fn expire_armed(&mut self) {
-        if self.armed_at.is_some_and(|at| at.elapsed() >= AUTO_CONFIRM) {
+        let Some(delay) = config::get().confirm_delay() else {
+            return;
+        };
+        if self.armed_at.is_some_and(|at| at.elapsed() >= delay) {
             self.commit_key();
         }
     }
 
     /// How long until the armed key confirms itself, if one is armed.
     fn arm_deadline(&self) -> Option<Duration> {
-        self.armed_at
-            .map(|at| AUTO_CONFIRM.saturating_sub(at.elapsed()))
+        let delay = config::get().confirm_delay()?;
+        self.armed_at.map(|at| delay.saturating_sub(at.elapsed()))
     }
 
     /// Whether confirming this key would click rather than narrow. A key that
@@ -618,7 +618,8 @@ impl App {
             std::thread::spawn(move || {
                 let _ = tx.send(atspi::clickable_elements(pid, &title).map_err(|e| e.to_string()));
             });
-            let els = match rx.recv_timeout(Duration::from_millis(1800)) {
+            let wait = Duration::from_millis(config::get().elements.query_ms);
+            let els = match rx.recv_timeout(wait) {
                 Ok(Ok(v)) => v,
                 Ok(Err(e)) => {
                     eprintln!("atspi: {e}");
@@ -657,7 +658,9 @@ impl App {
         if bw <= 0 || bh <= 0 {
             return;
         }
-        let (buffer, buf) = match self.pool.create_buffer(bw, bh, bw * 4, wl_shm::Format::Argb8888)
+        let (buffer, buf) = match self
+            .pool
+            .create_buffer(bw, bh, bw * 4, wl_shm::Format::Argb8888)
         {
             Ok(v) => v,
             Err(e) => {
@@ -666,7 +669,7 @@ impl App {
             }
         };
         let mut canvas = Canvas { buf, w: bw, h: bh };
-        canvas.clear(DIM);
+        canvas.clear(*config::get().colors.dim);
         match self.stage {
             Stage::PickWindow => draw_pick_window(&self.snap, &self.font, &mut canvas, scale),
             Stage::PickTile { win } => {
@@ -734,7 +737,7 @@ pub fn render(
         w: bw,
         h: bh,
     };
-    canvas.clear(DIM);
+    canvas.clear(*config::get().colors.dim);
     let w = snap.windows.get(win).ok_or("no such window; see --list")?;
     let els = atspi::clickable_elements(w.pid, &w.title).unwrap_or_else(|e| {
         eprintln!("atspi: {e}");
@@ -775,7 +778,7 @@ fn draw_pick_window(snap: &Snapshot, font: &Font, canvas: &mut Canvas, scale: i3
             (w.h * scale) as f32,
         )
         .grow(-s);
-        canvas.round_rect_outline(frame, 8.0 * s, 1.5 * s, TILE_BORDER);
+        canvas.round_rect_outline(frame, 8.0 * s, 1.5 * s, *config::get().colors.tile_border);
         let side = (w.w.min(w.h) as f32 * 0.30).clamp(56.0, 140.0) * s;
         let card = Rect::new(
             frame.x + (frame.w - side) / 2.0,
@@ -783,16 +786,21 @@ fn draw_pick_window(snap: &Snapshot, font: &Font, canvas: &mut Canvas, scale: i3
             side,
             side,
         );
-        canvas.round_rect_shadow(card.shift(0.0, 2.0 * s), side * 0.24, 6.0 * s, SHADOW);
-        canvas.round_rect(card, side * 0.24, BOX_BG);
-        canvas.round_rect_outline(card, side * 0.24, 1.5 * s, BOX_BORDER);
+        canvas.round_rect_shadow(
+            card.shift(0.0, 2.0 * s),
+            side * 0.24,
+            6.0 * s,
+            *config::get().colors.shadow,
+        );
+        canvas.round_rect(card, side * 0.24, box_bg());
+        canvas.round_rect_outline(card, side * 0.24, 1.5 * s, box_border());
         canvas.text_centered(
             font,
             &(i + 1).to_string(),
             card.x + side / 2.0,
             card.y + side / 2.0,
             side * 0.55,
-            TEXT,
+            *config::get().colors.text,
         );
     }
 }
@@ -823,22 +831,41 @@ fn draw_pick_tile(
         .grow(-1.5 * s);
         let radius = 10.0 * s;
         if hot {
-            canvas.round_rect_shadow(tile, radius, 10.0 * s, ARMED_GLOW);
+            canvas.round_rect_shadow(tile, radius, 10.0 * s, armed_glow());
         }
-        canvas.round_rect(tile, radius, if hot { ARMED_FILL } else { TILE_BG });
+        canvas.round_rect(
+            tile,
+            radius,
+            if hot {
+                armed_fill()
+            } else {
+                *config::get().colors.tile
+            },
+        );
         canvas.round_rect_outline(
             tile,
             radius,
             if hot { 2.5 * s } else { s },
-            if hot { ARMED_RING } else { TILE_BORDER },
+            if hot {
+                *config::get().colors.ring
+            } else {
+                *config::get().colors.tile_border
+            },
         );
         let letter = t.ch.to_ascii_uppercase().to_string();
         let px = (t.w.min(t.h) as f32 * 0.42).min(64.0 * s);
         let (cx, cy) = (tile.x + tile.w / 2.0, tile.y + tile.h / 2.0);
         // The letter sits over whatever the window is showing, so it carries
         // its own shadow rather than trusting the background.
-        canvas.text_centered(font, &letter, cx + s, cy + s, px, SHADOW);
-        canvas.text_centered(font, &letter, cx, cy, px, TEXT);
+        canvas.text_centered(
+            font,
+            &letter,
+            cx + s,
+            cy + s,
+            px,
+            *config::get().colors.shadow,
+        );
+        canvas.text_centered(font, &letter, cx, cy, px, *config::get().colors.text);
     }
 }
 
@@ -881,10 +908,10 @@ fn place_labels(
     canvas: (i32, i32),
     scale: i32,
 ) -> Vec<LabelBox> {
-    let px = LABEL_PX * scale as f32;
-    let pad_x = (LABEL_PAD_X * scale as f32) as i32;
-    let pad_y = (LABEL_PAD_Y * scale as f32) as i32;
-    let gap = LABEL_GAP * scale;
+    let px = config::get().label.size * scale as f32;
+    let pad_x = (config::get().label.pad_x * scale as f32) as i32;
+    let pad_y = (config::get().label.pad_y * scale as f32) as i32;
+    let gap = (config::get().label.gap * scale as f32) as i32;
     let mut taken: Vec<LabelBox> = Vec::with_capacity(hints.len());
     for h in hints {
         let ex = ((h.rx - mon.0 as f64) * scale as f64) as i32;
@@ -970,7 +997,7 @@ fn draw_pick_hint(
     let mon = &snap.monitor;
     let w = &snap.windows[win];
     let s = scale as f32;
-    let px = LABEL_PX * s;
+    let px = config::get().label.size * s;
     canvas.round_rect_outline(
         Rect::new(
             ((w.x - mon.x) * scale) as f32,
@@ -981,7 +1008,7 @@ fn draw_pick_hint(
         .grow(-s),
         8.0 * s,
         1.5 * s,
-        TILE_BORDER,
+        *config::get().colors.tile_border,
     );
     let boxes = place_labels(hints, font, (mon.x, mon.y), (canvas.w, canvas.h), scale);
     // What the armed key keeps is drawn last so nothing can cover it.
@@ -998,9 +1025,19 @@ fn draw_pick_hint(
             // the others down: nothing has been confirmed yet, and dimming
             // them would answer a question the press has only asked.
             let (ring, bg, edge, text) = if hot {
-                (ARMED_RING, ARMED_BG, ARMED_EDGE, ARMED_TEXT)
+                (
+                    *config::get().colors.ring,
+                    *config::get().colors.armed,
+                    armed_edge(),
+                    *config::get().colors.armed_text,
+                )
             } else {
-                (HINT_RING, HINT_BG, HINT_EDGE, HINT_TEXT)
+                (
+                    shade(*config::get().colors.hint, 0.5),
+                    *config::get().colors.hint,
+                    hint_edge(),
+                    *config::get().colors.hint_text,
+                )
             };
             // Only the element about to be clicked is outlined. Ringing
             // every candidate turns a dense corner of a window into a mess
@@ -1012,15 +1049,20 @@ fn draw_pick_hint(
                     (h.rw * scale as f64) as f32,
                     (h.rh * scale as f64) as f32,
                 );
-                canvas.round_rect_shadow(el, 4.0 * s, 6.0 * s, ARMED_GLOW.fade(0.45));
+                canvas.round_rect_shadow(el, 4.0 * s, 6.0 * s, armed_glow().fade(0.45));
                 canvas.round_rect_outline(el, 4.0 * s, 2.0 * s, ring);
             }
             let r = b.rect();
             let radius = r.h * 0.3;
             if hot && clinches {
-                canvas.round_rect_shadow(r, radius, 7.0 * s, ARMED_GLOW);
+                canvas.round_rect_shadow(r, radius, 7.0 * s, armed_glow());
             } else {
-                canvas.round_rect_shadow(r.shift(0.0, 1.2 * s), radius, 3.5 * s, SHADOW);
+                canvas.round_rect_shadow(
+                    r.shift(0.0, 1.2 * s),
+                    radius,
+                    3.5 * s,
+                    *config::get().colors.shadow,
+                );
             }
             canvas.round_rect(r, radius, bg);
             canvas.round_rect_outline(r, radius, s, edge);
@@ -1032,7 +1074,7 @@ fn draw_pick_hint(
 /// How wide a label's text is once its characters are spaced out.
 fn label_width(font: &Font, label: &str, px: f32, s: f32) -> f32 {
     let n = label.chars().count().saturating_sub(1) as f32;
-    draw::text_width(font, label, px) + n * LABEL_TRACK * s
+    draw::text_width(font, label, px) + n * config::get().label.track * s
 }
 
 /// The label's own text, character by character: keys already confirmed step
@@ -1051,7 +1093,7 @@ fn draw_label_text(
     s: f32,
 ) {
     let label = label.to_ascii_uppercase();
-    let track = LABEL_TRACK * s;
+    let track = config::get().label.track * s;
     let base = draw::baseline(font, r.y + r.h / 2.0, px);
     let mut pen = r.x + (r.w - label_width(font, &label, px, s)) / 2.0;
     for (i, ch) in label.chars().enumerate() {
@@ -1063,10 +1105,10 @@ fn draw_label_text(
         let armed = hot && i == done;
         if armed {
             let cap = Rect::new(pen - track / 2.0, r.y + 2.5 * s, w + track, r.h - 5.0 * s);
-            canvas.round_rect(cap, cap.h * 0.32, ARMED_CAP);
+            canvas.round_rect(cap, cap.h * 0.32, *config::get().colors.armed_key);
         }
         let color = match (armed, i < done) {
-            (true, _) => ARMED_CAP_TEXT,
+            (true, _) => *config::get().colors.armed_key_text,
             (_, true) => text.fade(0.35),
             _ => text,
         };

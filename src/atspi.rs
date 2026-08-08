@@ -43,8 +43,6 @@ const STATE_SENSITIVE: u64 = 24;
 const STATE_SHOWING: u64 = 25;
 
 const MAX_NODES: usize = 4000;
-const MAX_ELEMENTS: usize = 400;
-const WALK_BUDGET: Duration = Duration::from_millis(1200);
 
 /// A clickable element, window-relative logical coordinates.
 #[derive(Debug, Clone)]
@@ -241,7 +239,8 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
         _ => (f64::MAX, f64::MAX),
     };
 
-    let deadline = Instant::now() + WALK_BUDGET;
+    let cfg = &crate::config::get().elements;
+    let deadline = Instant::now() + Duration::from_millis(cfg.walk_ms);
     let mut queue: VecDeque<(String, String, f64, Option<String>)> = VecDeque::new();
     queue.push_back((frame.0.clone(), frame.1.to_string(), 1.0, None));
     let mut visited = 0usize;
@@ -249,7 +248,7 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
     let mut out = Vec::new();
 
     while let Some((node_dest, path, ratio, parent_path)) = queue.pop_front() {
-        if visited >= MAX_NODES || out.len() >= MAX_ELEMENTS || Instant::now() > deadline {
+        if visited >= MAX_NODES || out.len() >= cfg.max || Instant::now() > deadline {
             // The walk is breadth-first, so running out of budget drops the
             // deepest nodes: a heavy page keeps its chrome and loses part of
             // its content. Say so instead of silently hinting a subset.

@@ -1,4 +1,5 @@
 mod atspi;
+mod config;
 mod draw;
 mod grid;
 mod hint;
