@@ -82,7 +82,11 @@ switches back to hint mode when elements exist.
    check box, combo box, menu item, tab, slider, list item, and so on)
    and SENSITIVE, and read their extents in window coordinates.
    Budgets: 4000 nodes, 400 elements, 1.2 s.
-5. Coordinate correction: toolkits report window-relative coordinates
+5. Pruning: trees nest a link inside a list row inside a cell, all with
+   near-identical extents, and one hint per level buries the window in
+   labels. A row or tree item that wraps another clickable element
+   gives way to it, and what is left keeps one element per spot.
+6. Coordinate correction: toolkits report window-relative coordinates
    under Wayland (they do not know their global position), so the
    window's global position from Hyprland is added afterwards. Chromium
    additionally reports web-content extents in physical pixels while

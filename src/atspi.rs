@@ -30,6 +30,14 @@ pub const CLICKABLE_ROLES: &[u32] = &[
     91, // tree item
 ];
 
+/// Roles that usually wrap the thing you actually want to click: a list row
+/// around its link, a tree item around its button. They keep their own hint
+/// only when they hold nothing clickable.
+const CONTAINER_ROLES: &[u32] = &[
+    32, // list item
+    91, // tree item
+];
+
 // AtspiStateType bit positions.
 const STATE_SENSITIVE: u64 = 24;
 const STATE_SHOWING: u64 = 25;
@@ -68,6 +76,48 @@ pub fn role_name(role: u32) -> &'static str {
         91 => "tree item",
         _ => "?",
     }
+}
+
+/// Whether `inner` sits within `outer`, allowing for the rounding an
+/// accessibility tree does on its own extents.
+fn inside(inner: &Element, outer: &Element) -> bool {
+    const T: f64 = 2.0;
+    inner.x >= outer.x - T
+        && inner.y >= outer.y - T
+        && inner.x + inner.w <= outer.x + outer.w + T
+        && inner.y + inner.h <= outer.y + outer.h + T
+}
+
+/// Whether two elements cover the same spot closely enough that two hints
+/// would land on top of each other.
+fn same_spot(a: &Element, b: &Element) -> bool {
+    const T: f64 = 4.0;
+    (a.x - b.x).abs() <= T
+        && (a.y - b.y).abs() <= T
+        && (a.w - b.w).abs() <= T
+        && (a.h - b.h).abs() <= T
+}
+
+/// One hint per target. Trees routinely nest a link inside a list row inside
+/// a cell, all with near-identical extents, and hinting every level of that
+/// buries the window in labels. Wrappers give way to what they wrap, and
+/// what is left keeps one element per spot.
+fn prune(els: Vec<Element>) -> Vec<Element> {
+    let is_container = |e: &Element| CONTAINER_ROLES.contains(&e.role);
+    let area = |e: &Element| e.w * e.h;
+    let mut kept: Vec<Element> = Vec::with_capacity(els.len());
+    for (i, e) in els.iter().enumerate() {
+        let wraps_a_target = is_container(e)
+            && els
+                .iter()
+                .enumerate()
+                .any(|(j, o)| j != i && inside(o, e) && (!is_container(o) || area(o) < area(e)));
+        if wraps_a_target || kept.iter().any(|k| same_spot(k, e)) {
+            continue;
+        }
+        kept.push(e.clone());
+    }
+    kept
 }
 
 fn children(conn: &Connection, dest: &str, path: &str) -> Vec<(String, OwnedObjectPath)> {
@@ -263,5 +313,62 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
     }
 
     out.sort_by(|a, b| (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap());
-    Ok(out)
+    Ok(prune(out))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn el(role: u32, x: f64, y: f64, w: f64, h: f64) -> Element {
+        Element { role, x, y, w, h }
+    }
+
+    const LIST_ITEM: u32 = 32;
+    const LINK: u32 = 88;
+    const BUTTON: u32 = 43;
+
+    #[test]
+    fn a_row_gives_way_to_the_link_inside_it() {
+        let els = vec![
+            el(LIST_ITEM, 0.0, 0.0, 400.0, 60.0),
+            el(LINK, 8.0, 4.0, 120.0, 20.0),
+        ];
+        let kept = prune(els);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].role, LINK);
+    }
+
+    #[test]
+    fn a_row_with_nothing_clickable_keeps_its_hint() {
+        let els = vec![
+            el(LIST_ITEM, 0.0, 0.0, 400.0, 60.0),
+            el(LINK, 8.0, 400.0, 120.0, 20.0),
+        ];
+        assert_eq!(prune(els).len(), 2);
+    }
+
+    #[test]
+    fn stacked_duplicates_collapse_to_one() {
+        let els = vec![
+            el(BUTTON, 10.0, 10.0, 40.0, 40.0),
+            el(LINK, 12.0, 11.0, 41.0, 39.0),
+            el(BUTTON, 80.0, 10.0, 40.0, 40.0),
+        ];
+        let kept = prune(els);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].role, BUTTON);
+        assert_eq!(kept[1].x, 80.0);
+    }
+
+    #[test]
+    fn nested_rows_keep_the_innermost() {
+        let els = vec![
+            el(LIST_ITEM, 0.0, 0.0, 400.0, 200.0),
+            el(LIST_ITEM, 10.0, 10.0, 380.0, 40.0),
+        ];
+        let kept = prune(els);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].h, 40.0);
+    }
 }
