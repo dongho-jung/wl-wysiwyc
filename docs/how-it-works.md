@@ -126,8 +126,9 @@ the overlay is up its keys live in a compositor submap, and a submap
 answers only for the keys in it, so the keybind that started the overlay
 cannot fire again: that key does nothing unless the overlay claims it.
 Claimed, it starts the choices over, which is what a key pressed by
-mistake should do. Launching the tool again from anywhere else, a
-terminal or a second keybind, cancels the overlay instead.
+mistake should do. Launching the tool
+again from anywhere else, a terminal or a second keybind, cancels the
+overlay instead.
 
 ### Hint mode
 
@@ -184,6 +185,14 @@ when elements exist.
    Running out of budget is reported on stderr, because the walk is
    breadth-first and a heavy page then keeps its chrome and loses part
    of its content.
+   A node costs four calls (role, state, extents, children) and a window
+   runs to several hundred nodes, so the walk reads 32 nodes at a time
+   with a thread each. One zbus connection carries them all: replies are
+   matched to calls by serial, so the calls overlap and a batch costs
+   about what the application takes to answer it rather than a round
+   trip apiece. That is worth roughly six times the speed, and it is the
+   difference between the overlay appearing at once and appearing after
+   a visible pause.
 5. Viewport: a node whose rectangle sits wholly outside the window, or
    which is not SHOWING, goes to the back of the walk along with
    everything inside it. A long page has far more of those than it has
@@ -206,9 +215,15 @@ when elements exist.
    ratio of its extents to its parent's is divided back out of every
    descendant.
 
-Measured on this setup: a small page yields 17 elements in about 0.1 s,
-the GeekNews front page 57 elements in about 0.1 s, and a scrolled
-Portainer service page 101 elements in about 0.7 s.
+Measured on this setup: a small page yields 17 elements in about 0.05 s
+and a scrolled Portainer service page 130 elements in about 0.11 s,
+which puts the whole overlay on screen in about 0.16 s. The walk starts
+before the font and the Wayland surface do, so most of the rest of the
+startup happens while it runs.
+
+Chromium builds its accessibility tree as it is asked for, so the first
+walk of a page it has never been asked about finds less than the second:
+the counts above are what it settles on.
 
 ## System setup required for hints
 
@@ -222,9 +237,18 @@ Portainer service page 101 elements in about 0.7 s.
   `--force-renderer-accessibility`, easiest as a line in
   `~/.config/chromium-flags.conf`. Already-running instances need a
   restart to pick it up.
-- Electron apps bundle their own Chromium and do not read
-  chromium-flags.conf; they need the same flag passed by their own
-  launcher wrapper.
+- Electron apps (Slack, Discord, VS Code) bundle their own Chromium and
+  do not read chromium-flags.conf, so the flag has to go on their own
+  command line. For a packaged app that means copying its desktop entry
+  to `~/.local/share/applications/` and adding the flag to `Exec=`:
+
+  ```
+  Exec=/usr/bin/slack --force-renderer-accessibility -s %U
+  ```
+
+  Without it the application is absent from the accessibility bus
+  entirely, which the overlay reports on stderr before falling back to
+  the grid.
 - Applications that draw their own UI (kitty and other GPU terminals,
   mpv, games) have no accessibility tree at all; the grid fallback
   covers them.

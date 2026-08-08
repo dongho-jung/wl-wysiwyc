@@ -44,6 +44,10 @@ const STATE_SHOWING: u64 = 25;
 
 const MAX_NODES: usize = 4000;
 
+/// How many nodes the walk reads at once. Wide enough to keep the bus busy,
+/// narrow enough that the priority order below still means something.
+const BATCH: usize = 32;
+
 /// A node waiting to be walked: where it lives, the pixel ratio inherited
 /// from its document, and the parent that ratio was measured against.
 type Pending = (String, String, f64, Option<String>);
@@ -120,6 +124,52 @@ fn prune(els: Vec<Element>) -> Vec<Element> {
         kept.push(e.clone());
     }
     kept
+}
+
+/// Everything the walk wants to know about one node.
+#[derive(Default)]
+struct NodeInfo {
+    role: Option<u32>,
+    state: u64,
+    extents: Option<(i32, i32, i32, i32)>,
+    kids: Vec<(String, OwnedObjectPath)>,
+}
+
+/// Read a batch of nodes with their calls overlapping.
+///
+/// Four round trips per node, made one after another, is what the walk used
+/// to spend nearly all of its time on: the bus is idle while each reply
+/// travels. A zbus connection matches replies to calls by serial, so calls
+/// from several threads can be outstanding on the one connection at once, and
+/// a batch then costs roughly what the application takes to answer it rather
+/// than a round trip per call.
+fn read_batch(conn: &Connection, batch: &[Pending]) -> Vec<NodeInfo> {
+    if batch.len() == 1 {
+        let (dest, path, ..) = &batch[0];
+        return vec![read_node(conn, dest, path)];
+    }
+    std::thread::scope(|scope| {
+        let threads: Vec<_> = batch
+            .iter()
+            .map(|(dest, path, ..)| {
+                let conn = conn.clone();
+                scope.spawn(move || read_node(&conn, dest, path))
+            })
+            .collect();
+        threads
+            .into_iter()
+            .map(|t| t.join().unwrap_or_default())
+            .collect()
+    })
+}
+
+fn read_node(conn: &Connection, dest: &str, path: &str) -> NodeInfo {
+    NodeInfo {
+        role: role_of(conn, dest, path),
+        state: state_of(conn, dest, path),
+        extents: extents_of(conn, dest, path),
+        kids: children(conn, dest, path),
+    }
 }
 
 fn children(conn: &Connection, dest: &str, path: &str) -> Vec<(String, OwnedObjectPath)> {
@@ -253,93 +303,115 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
     let mut seen_rects = HashSet::new();
     let mut out = Vec::new();
 
-    while let Some((node_dest, path, ratio, parent_path)) =
-        queue.pop_front().or_else(|| later.pop_front())
-    {
-        if visited >= MAX_NODES || out.len() >= cfg.max || Instant::now() > deadline {
-            // Running out of budget drops whatever the walk had not reached:
-            // the deepest nodes, and the off-window ones held back below. A
-            // heavy page keeps its chrome and loses part of its content, so
-            // say so instead of silently hinting a subset.
-            eprintln!(
-                "atspi: walk stopped early after {visited} nodes, {} elements",
-                out.len()
-            );
-            break;
-        }
-        if path == NULL_PATH {
-            continue;
-        }
-        visited += 1;
+    let on_screen = |(ex, ey, ew, eh): (f64, f64, f64, f64)| {
+        ex + ew > 0.0 && ey + eh > 0.0 && ex < frame_w && ey < frame_h
+    };
 
-        let Some(role) = role_of(&conn, &node_dest, &path) else {
-            continue;
-        };
-        let st = state_of(&conn, &node_dest, &path);
-        let showing = st & (1 << STATE_SHOWING) != 0;
-
-        // A node's own rectangle, once Chromium's pixel ratio is divided out.
-        let rect = extents_of(&conn, &node_dest, &path).map(|(x, y, w, h)| {
-            (
-                x as f64 / ratio,
-                y as f64 / ratio,
-                w as f64 / ratio,
-                h as f64 / ratio,
-            )
-        });
-        let on_screen = |(ex, ey, ew, eh): (f64, f64, f64, f64)| {
-            ex + ew > 0.0 && ey + eh > 0.0 && ex < frame_w && ey < frame_h
-        };
-
-        // Whether this node's own box is worth walking into first. A container
-        // that sits off the window usually has nothing visible inside it, and
-        // a long page has far more of those than visible ones. Chromium is the
-        // exception that stops this being a prune: it gives a scroll container
-        // the box of its whole contents, which for a scrolled page is nowhere
-        // near the window, while the visible rows inside it are placed
-        // correctly. So off-window subtrees go to the back of the walk instead
-        // of being dropped, and a page that has hidden a widget in a corner
-        // still gets hinted once the visible part is done.
-        let promising = showing && rect.is_none_or(|r| r.2 <= 0.0 || r.3 <= 0.0 || on_screen(r));
-
-        if showing && CLICKABLE_ROLES.contains(&role) && st & (1 << STATE_SENSITIVE) != 0 {
-            if let Some((ex, ey, ew, eh)) = rect {
-                if ew >= 3.0 && eh >= 3.0 && on_screen((ex, ey, ew, eh)) {
-                    let key = (ex as i32, ey as i32, ew as i32, eh as i32, role);
-                    if seen_rects.insert(key) {
-                        out.push(Element {
-                            role,
-                            x: ex,
-                            y: ey,
-                            w: ew,
-                            h: eh,
-                        });
-                    }
-                }
+    'walk: loop {
+        // Take a batch, whichever queue has something, and read all of it at
+        // once. One node is four round trips and a window is a few hundred
+        // nodes; waiting for each reply in turn is nearly all of the pause
+        // before the overlay appears.
+        let mut batch: Vec<Pending> = Vec::with_capacity(BATCH);
+        while batch.len() < BATCH {
+            match queue.pop_front().or_else(|| later.pop_front()) {
+                Some(node) if node.1 == NULL_PATH => continue,
+                Some(node) => batch.push(node),
+                None => break,
             }
         }
+        if batch.is_empty() {
+            break;
+        }
+        visited += batch.len();
+        let read = read_batch(&conn, &batch);
 
-        let mut child_ratio = ratio;
-        if role == ROLE_DOCUMENT_WEB {
-            // The ratio has to come from the raw extents, since dividing by
-            // the current ratio is the very thing being corrected.
-            if let (Some(parent), Some((_, _, dw, _))) =
-                (parent_path.as_deref(), extents_of(&conn, &node_dest, &path))
-            {
-                if let Some((_, _, pw, _)) = extents_of(&conn, &node_dest, parent) {
-                    if pw > 50 && dw > 0 {
-                        let r = dw as f64 / pw as f64;
-                        if (0.75..=4.0).contains(&r) {
-                            child_ratio = ratio * r;
+        for ((node_dest, path, ratio, parent_path), info) in batch.into_iter().zip(read) {
+            if out.len() >= cfg.max {
+                break 'walk;
+            }
+            let Some(role) = info.role else {
+                continue;
+            };
+            let st = info.state;
+            let showing = st & (1 << STATE_SHOWING) != 0;
+
+            // A node's own rectangle, once Chromium's pixel ratio is divided
+            // out.
+            let rect = info.extents.map(|(x, y, w, h)| {
+                (
+                    x as f64 / ratio,
+                    y as f64 / ratio,
+                    w as f64 / ratio,
+                    h as f64 / ratio,
+                )
+            });
+
+            // Whether this node's own box is worth walking into first. A
+            // container that sits off the window usually has nothing visible
+            // inside it, and a long page has far more of those than visible
+            // ones. Chromium is the exception that stops this being a prune:
+            // it gives a scroll container the box of its whole contents, which
+            // for a scrolled page is nowhere near the window, while the
+            // visible rows inside it are placed correctly. So off-window
+            // subtrees go to the back of the walk instead of being dropped,
+            // and a page that has hidden a widget in a corner still gets
+            // hinted once the visible part is done.
+            let promising =
+                showing && rect.is_none_or(|r| r.2 <= 0.0 || r.3 <= 0.0 || on_screen(r));
+
+            if showing && CLICKABLE_ROLES.contains(&role) && st & (1 << STATE_SENSITIVE) != 0 {
+                if let Some((ex, ey, ew, eh)) = rect {
+                    if ew >= 3.0 && eh >= 3.0 && on_screen((ex, ey, ew, eh)) {
+                        let key = (ex as i32, ey as i32, ew as i32, eh as i32, role);
+                        if seen_rects.insert(key) {
+                            out.push(Element {
+                                role,
+                                x: ex,
+                                y: ey,
+                                w: ew,
+                                h: eh,
+                            });
                         }
                     }
                 }
             }
+
+            let mut child_ratio = ratio;
+            if role == ROLE_DOCUMENT_WEB {
+                // The ratio has to come from the raw extents, since dividing
+                // by the current ratio is the very thing being corrected.
+                if let (Some(parent), Some((_, _, dw, _))) = (parent_path.as_deref(), info.extents)
+                {
+                    if let Some((_, _, pw, _)) = extents_of(&conn, &node_dest, parent) {
+                        if pw > 50 && dw > 0 {
+                            let r = dw as f64 / pw as f64;
+                            if (0.75..=4.0).contains(&r) {
+                                child_ratio = ratio * r;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let next = if promising { &mut queue } else { &mut later };
+            for (cd, cp) in info.kids {
+                next.push_back((cd, cp.to_string(), child_ratio, Some(path.clone())));
+            }
         }
 
-        let next = if promising { &mut queue } else { &mut later };
-        for (cd, cp) in children(&conn, &node_dest, &path) {
-            next.push_back((cd, cp.to_string(), child_ratio, Some(path.clone())));
+        if visited >= MAX_NODES || Instant::now() > deadline {
+            // Running out of budget drops whatever the walk had not reached:
+            // the deepest nodes, and the off-window ones held back above. A
+            // heavy page keeps its chrome and loses part of its content, so
+            // say so instead of silently hinting a subset.
+            if !queue.is_empty() || !later.is_empty() {
+                eprintln!(
+                    "atspi: walk stopped early after {visited} nodes, {} elements",
+                    out.len()
+                );
+            }
+            break;
         }
     }
 

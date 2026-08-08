@@ -180,23 +180,55 @@ struct App {
     picked: Option<(Target, (f64, f64))>,
     elements_cache: HashMap<usize, Vec<Element>>,
     pending_pick: Option<usize>,
+    /// An element query already in flight, so the wait for it overlaps the
+    /// rest of the startup instead of following it.
+    query: Option<Query>,
+}
+
+/// An element query running on its own thread.
+struct Query {
+    win: usize,
+    rx: std::sync::mpsc::Receiver<Result<Vec<Element>, String>>,
+    started: Instant,
+}
+
+impl Query {
+    fn start(snap: &Snapshot, win: usize) -> Self {
+        let w = &snap.windows[win];
+        let (pid, title) = (w.pid, w.title.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(atspi::clickable_elements(pid, &title).map_err(|e| e.to_string()));
+        });
+        Self {
+            win,
+            rx,
+            started: Instant::now(),
+        }
+    }
+
+    /// Wait for the elements, giving up on an application that never answers.
+    fn take(self) -> Vec<Element> {
+        let wait = Duration::from_millis(config::get().elements.query_ms)
+            .saturating_sub(self.started.elapsed());
+        match self.rx.recv_timeout(wait) {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => {
+                eprintln!("atspi: {e}");
+                Vec::new()
+            }
+            Err(_) => {
+                eprintln!("atspi: element query timed out");
+                Vec::new()
+            }
+        }
+    }
 }
 
 /// Show the overlay and return the chosen global click position, or None
 /// if the user cancelled. The click itself is performed here as well,
 /// after the overlay is torn down.
 pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, Box<dyn Error>> {
-    let font = draw::load_font()?;
-    let conn = Connection::connect_to_env()?;
-    let (globals, mut queue) = registry_queue_init::<App>(&conn)?;
-    let qh = queue.handle();
-
-    let compositor = CompositorState::bind(&globals, &qh)?;
-    let layer_shell = LayerShell::bind(&globals, &qh)?;
-    let shm = Shm::bind(&globals, &qh)?;
-    let pool = SlotPool::new(4096, &shm)?;
-    let vp_manager: Option<ZwlrVirtualPointerManagerV1> = globals.bind(&qh, 1..=2, ()).ok();
-
     // A 1-based window number from the command line, the focused window when
     // there is none, and the focused window again when the number is out of
     // range.
@@ -215,6 +247,23 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         Some(SmokeView::Hints(n)) => (Stage::PickWindow, Some(window_or_focused(*n))),
         None => (Stage::PickWindow, Some(snap.focused)),
     };
+
+    // Ask the window for its elements before doing anything else. It is the
+    // slowest part of starting up by a distance, and everything below - the
+    // font, the Wayland globals, the surface - happens while it runs.
+    let query = pending_pick.map(|win| Query::start(&snap, win));
+
+    let font = draw::load_font()?;
+    let conn = Connection::connect_to_env()?;
+    let (globals, mut queue) = registry_queue_init::<App>(&conn)?;
+    let qh = queue.handle();
+
+    let compositor = CompositorState::bind(&globals, &qh)?;
+    let layer_shell = LayerShell::bind(&globals, &qh)?;
+    let shm = Shm::bind(&globals, &qh)?;
+    let pool = SlotPool::new(4096, &shm)?;
+    let vp_manager: Option<ZwlrVirtualPointerManagerV1> = globals.bind(&qh, 1..=2, ()).ok();
+
     let buffer_scale = (snap.monitor.scale.ceil() as i32).max(1);
 
     let mut app = App {
@@ -245,6 +294,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         picked: None,
         elements_cache: HashMap::new(),
         pending_pick,
+        query,
     };
 
     // Output names arrive with the initial burst of globals metadata.
@@ -768,24 +818,14 @@ impl App {
             return;
         };
         if !self.elements_cache.contains_key(&win) {
-            let w = &self.snap.windows[win];
-            let (pid, title) = (w.pid, w.title.clone());
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = tx.send(atspi::clickable_elements(pid, &title).map_err(|e| e.to_string()));
-            });
-            let wait = Duration::from_millis(config::get().elements.query_ms);
-            let els = match rx.recv_timeout(wait) {
-                Ok(Ok(v)) => v,
-                Ok(Err(e)) => {
-                    eprintln!("atspi: {e}");
-                    Vec::new()
-                }
-                Err(_) => {
-                    eprintln!("atspi: element query timed out");
-                    Vec::new()
+            let query = match self.query.take() {
+                Some(q) if q.win == win => q,
+                other => {
+                    self.query = other;
+                    Query::start(&self.snap, win)
                 }
             };
+            let els = query.take();
             self.elements_cache.insert(win, els);
         }
         if self.elements_cache.get(&win).is_none_or(Vec::is_empty) {
