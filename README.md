@@ -17,17 +17,16 @@ cargo build --release
 Keys: the overlay opens with the target on whatever the pointer is
 nearest, the arrow keys move it, and typing a hint sends it there. `-`
 clicks the target, `=` right-clicks it, and `Shift`+`-` double-clicks
-it. A hint's keys are where its
-target is: the keyboard is laid over the window, so something in the
-bottom-left corner is labelled `z` and something in the top-right `p`.
-`Space` switches between hints and the letter grid, `Tab` picks another
-window with `1`-`9`, `Backspace` undoes one press, and `Esc` backs out
-and then quits. Set `keys.reset` to the key that opens the overlay and
-pressing it again starts over.
-`Ctrl+Esc` gets the keyboard back if a run is killed before it can tidy
-up.
+it. A hint's keys are where its target is: the keyboard is laid over the
+window, so something in the bottom-left corner is labelled `z` and
+something in the top-right `p`. `Space` switches between hints and the
+letter grid, `Tab` picks another window with `1`-`9`, `Backspace` undoes
+one press, and `Esc` backs out and then quits. Set `keys.reset` to the
+key that opens the overlay: pressing it starts the choices over, and
+pressing it with nothing to undo closes the overlay. `Ctrl+Esc` gets the
+keyboard back if a run is killed before it can tidy up.
 
-Colours, label sizing, the confirm delay, and the limits on reading a
+Colours, label sizing, which keys click, and the limits on reading a
 window are set in `~/.config/wl-wysiwyc/config.yaml`, which is optional:
 see [docs/configuration.md](docs/configuration.md).
 

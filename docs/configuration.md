@@ -31,11 +31,12 @@ keys:
   left_click: minus
   right_click: equal
 
-  # An extra key that clears everything and starts over, the way Esc
-  # does before it gives up. Worth setting to whatever key opens the
-  # overlay: while the overlay is up that key belongs to the overlay
-  # rather than to the keybind that started it, so a second press can
-  # undo a wrong turn instead of doing nothing. Empty means none.
+  # An extra key that puts the overlay back to how it opened, and closes
+  # it when there is nothing left to undo. Worth setting to whatever key
+  # opens the overlay: while the overlay is up that key belongs to the
+  # overlay rather than to the keybind that started it, so pressing it
+  # again undoes a wrong turn instead of doing nothing, and pressing
+  # it once more gets you out. Empty means none.
   reset: ""
 
 label:

@@ -180,6 +180,9 @@ struct App {
     picked: Option<(Target, (f64, f64))>,
     elements_cache: HashMap<usize, Vec<Element>>,
     pending_pick: Option<usize>,
+    /// Whether nothing has happened since the overlay opened or was last
+    /// reset, which is what lets the reset key close it.
+    fresh: bool,
     /// An element query already in flight, so the wait for it overlaps the
     /// rest of the startup instead of following it.
     query: Option<Query>,
@@ -294,6 +297,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         picked: None,
         elements_cache: HashMap::new(),
         pending_pick,
+        fresh: true,
         query,
     };
 
@@ -545,7 +549,7 @@ impl App {
             Key::LeftClick => return self.click_picked(BTN_LEFT, 1),
             Key::RightClick => return self.click_picked(BTN_RIGHT, 1),
             Key::DoubleClick => return self.click_picked(BTN_LEFT, 2),
-            Key::Reset => return self.reset_input(),
+            Key::Reset => return self.reset_or_quit(),
             Key::Left => return self.step(-1.0, 0.0),
             Key::Right => return self.step(1.0, 0.0),
             Key::Up => return self.step(0.0, -1.0),
@@ -563,6 +567,7 @@ impl App {
                 self.take(ch);
             } else if self.leads_anywhere(ch) {
                 self.armed = Some(ch);
+                self.fresh = false;
                 self.dirty = true;
             }
             return;
@@ -573,6 +578,7 @@ impl App {
     /// Act on a key, now that it is meant.
     fn take(&mut self, ch: char) {
         self.dirty = true;
+        self.fresh = false;
         match self.stage {
             Stage::PickWindow => {
                 if let Some(d) = ch.to_digit(10) {
@@ -678,6 +684,7 @@ impl App {
         /// in logical pixels: about a row of text.
         const IN_LINE: f64 = 24.0;
 
+        self.fresh = false;
         let from = match self.picked {
             Some((_, at)) => at,
             None => match hypr::cursor_pos() {
@@ -772,6 +779,7 @@ impl App {
     fn undo(&mut self) {
         if self.armed.take().is_some() || self.picked.take().is_some() || self.typed.pop().is_some()
         {
+            self.fresh = false;
             self.dirty = true;
         }
     }
@@ -780,7 +788,21 @@ impl App {
         self.typed.clear();
         self.armed = None;
         self.picked = None;
+        self.fresh = true;
         self.dirty = true;
+    }
+
+    /// The reset key puts the overlay back to how it opened, and closes it
+    /// when it is already there. Bound to whatever key opens the overlay,
+    /// that reads as one key doing one thing: press it again to undo a wrong
+    /// turn, press it once more to leave.
+    fn reset_or_quit(&mut self) {
+        if self.fresh {
+            self.exit = true;
+            return;
+        }
+        self.reset_input();
+        self.focus_nearest_cursor();
     }
 
     fn pick_window(&mut self) {

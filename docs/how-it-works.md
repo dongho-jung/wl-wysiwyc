@@ -125,8 +125,10 @@ swaps element hints for the letter grid. Tab opens the window picker.
 the overlay is up its keys live in a compositor submap, and a submap
 answers only for the keys in it, so the keybind that started the overlay
 cannot fire again: that key does nothing unless the overlay claims it.
-Claimed, it starts the choices over, which is what a key pressed by
-mistake should do. Launching the tool
+Claimed, it puts the choices back to how the overlay opened, which is
+what a key pressed by mistake should do, and pressing it with nothing to
+undo closes the overlay. So the key that opens it also gets you out:
+once to abandon a half-typed hint, again to leave. Launching the tool
 again from anywhere else, a terminal or a second keybind, cancels the
 overlay instead.
 
