@@ -77,16 +77,6 @@ enum Stage {
     PickHint { win: usize },
 }
 
-/// The target a key press armed. Pressing the same key again clicks it;
-/// every other key picks a different target instead.
-#[derive(Clone, Copy)]
-enum Armed {
-    /// Index into `hints`.
-    Hint { index: usize, key: char },
-    /// Grid tile, which is also the key that armed it.
-    Tile { ch: char },
-}
-
 #[derive(Clone)]
 struct Hint {
     label: String,
@@ -118,8 +108,11 @@ struct App {
     exit: bool,
     target: Option<(f64, f64)>,
     hints: Vec<Hint>,
+    /// Keys already confirmed, narrowing the hints.
     typed: String,
-    armed: Option<Armed>,
+    /// A key pressed once and not confirmed yet: it previews what it would
+    /// select, and pressing it again commits it.
+    armed: Option<char>,
     elements_cache: HashMap<usize, Vec<Element>>,
     pending_pick: Option<usize>,
 }
@@ -317,7 +310,7 @@ impl App {
         match event.keysym {
             Keysym::Escape => return self.cancel(),
             Keysym::BackSpace => return self.undo(),
-            Keysym::Return | Keysym::KP_Enter => return self.click_armed(),
+            Keysym::Return | Keysym::KP_Enter => return self.commit_key(),
             Keysym::Tab => return self.pick_window(),
             _ => {}
         }
@@ -354,10 +347,14 @@ impl App {
         }
     }
 
-    /// Esc unwinds one step at a time: disarm, then drop what was typed,
-    /// then quit.
+    /// Esc unwinds one step at a time: drop the armed key, then everything
+    /// confirmed so far, then quit.
     fn cancel(&mut self) {
-        if self.armed.take().is_some() || !self.typed.is_empty() {
+        if self.armed.take().is_some() {
+            self.dirty = true;
+            return;
+        }
+        if !self.typed.is_empty() {
             self.typed.clear();
             self.dirty = true;
             return;
@@ -365,11 +362,10 @@ impl App {
         self.exit = true;
     }
 
-    /// Backspace steps back one key press: what it armed, and the character
-    /// that armed it.
+    /// Backspace undoes one key press: the armed key if there is one, the
+    /// last confirmed one otherwise.
     fn undo(&mut self) {
-        let was_armed = self.armed.take().is_some();
-        if self.typed.pop().is_some() || was_armed {
+        if self.armed.take().is_some() || self.typed.pop().is_some() {
             self.dirty = true;
         }
     }
@@ -393,24 +389,35 @@ impl App {
         self.exit = true;
     }
 
-    /// Click whatever is armed. Enter does this; so does pressing the key
-    /// that armed it a second time.
-    fn click_armed(&mut self) {
-        match self.armed {
-            Some(Armed::Hint { index, .. }) => {
-                let h = &self.hints[index];
-                self.click((h.cx, h.cy));
-            }
-            Some(Armed::Tile { ch }) => {
-                let Stage::PickTile { win } = self.stage else {
-                    return;
-                };
+    /// The hints still reachable, that is the ones starting with what has
+    /// been confirmed so far plus the given key.
+    fn leads_anywhere(&self, ch: char) -> bool {
+        let mut probe = self.typed.clone();
+        probe.push(ch);
+        self.hints.iter().any(|h| h.label.starts_with(&probe))
+    }
+
+    /// Confirm the armed key. Enter does this; so does pressing that key a
+    /// second time.
+    fn commit_key(&mut self) {
+        let Some(ch) = self.armed.take() else {
+            return;
+        };
+        self.dirty = true;
+        match self.stage {
+            Stage::PickTile { win } => {
                 let w = &self.snap.windows[win];
                 if let Some(t) = grid::tile_for(w.w as f64, w.h as f64, ch) {
                     self.click((w.x as f64 + t.x + t.w / 2.0, w.y as f64 + t.y + t.h / 2.0));
                 }
             }
-            None => {}
+            Stage::PickHint { .. } => {
+                self.typed.push(ch);
+                if let Some(h) = self.hints.iter().find(|h| h.label == self.typed) {
+                    self.click((h.cx, h.cy));
+                }
+            }
+            Stage::PickWindow => {}
         }
     }
 
@@ -418,59 +425,32 @@ impl App {
         if !ch.is_ascii_lowercase() {
             return;
         }
+        if self.armed == Some(ch) {
+            self.commit_key();
+            return;
+        }
         let w = &self.snap.windows[win];
-        if grid::tile_for(w.w as f64, w.h as f64, ch).is_none() {
-            return;
+        if grid::tile_for(w.w as f64, w.h as f64, ch).is_some() {
+            self.armed = Some(ch);
+            self.dirty = true;
         }
-        if matches!(self.armed, Some(Armed::Tile { ch: armed }) if armed == ch) {
-            self.click_armed();
-            return;
-        }
-        self.armed = Some(Armed::Tile { ch });
-        self.dirty = true;
     }
 
-    /// One key press narrows the visible hints; the press that leaves a
-    /// single candidate arms it, and repeating that key clicks it. Any other
-    /// key starts a new label instead, so a mistyped hint needs no undo.
+    /// Every key of a hint is confirmed on its own: the first press arms the
+    /// key and shows what it would leave, the second press commits it, and
+    /// committing the last key of a label clicks that element. A key that
+    /// leads nowhere is ignored, and any other key moves the preview.
     fn press_hint(&mut self, ch: char) {
         if !ch.is_ascii_lowercase() {
             return;
         }
-        if matches!(self.armed, Some(Armed::Hint { key, .. }) if key == ch) {
-            self.click_armed();
+        if self.armed == Some(ch) {
+            self.commit_key();
             return;
         }
-        if self.armed.take().is_some() {
-            self.typed.clear();
-        }
-        self.typed.push(ch);
-        if !self.hints.iter().any(|h| h.label.starts_with(&self.typed)) {
-            self.typed.clear();
-            self.typed.push(ch);
-            if !self.hints.iter().any(|h| h.label.starts_with(&self.typed)) {
-                self.typed.clear();
-            }
-        }
-        self.armed = self
-            .only_candidate()
-            .map(|index| Armed::Hint { index, key: ch });
-        self.dirty = true;
-    }
-
-    /// The one hint left matching what was typed, if exactly one is left.
-    fn only_candidate(&self) -> Option<usize> {
-        if self.typed.is_empty() {
-            return None;
-        }
-        let mut it = self
-            .hints
-            .iter()
-            .enumerate()
-            .filter(|(_, h)| h.label.starts_with(&self.typed));
-        match (it.next(), it.next()) {
-            (Some((i, _)), None) => Some(i),
-            _ => None,
+        if self.leads_anywhere(ch) {
+            self.armed = Some(ch);
+            self.dirty = true;
         }
     }
 
@@ -519,7 +499,7 @@ impl App {
         self.hints = els
             .iter()
             .zip(centers.iter())
-            .zip(hint::labels(&centers))
+            .zip(hint::labels(&centers, w.w as f64, w.h as f64))
             .map(|((e, &(cx, cy)), label)| Hint {
                 label,
                 rx: w.x as f64 + e.x,
@@ -558,20 +538,13 @@ impl App {
         match self.stage {
             Stage::PickWindow => draw_pick_window(&self.snap, &self.font, &mut canvas, scale),
             Stage::PickTile { win } => {
-                let armed = match self.armed {
-                    Some(Armed::Tile { ch }) => Some(ch),
-                    _ => None,
-                };
-                draw_pick_tile(&self.snap, win, armed, &self.font, &mut canvas, scale)
+                draw_pick_tile(&self.snap, win, self.armed, &self.font, &mut canvas, scale)
             }
             Stage::PickHint { win } => {
                 let view = HintView {
                     hints: &self.hints,
                     typed: &self.typed,
-                    armed: match self.armed {
-                        Some(Armed::Hint { index, .. }) => Some(index),
-                        _ => None,
-                    },
+                    armed: self.armed,
                 };
                 draw_pick_hint(&self.snap, win, view, &self.font, &mut canvas, scale)
             }
@@ -718,12 +691,12 @@ fn place_labels(
     taken
 }
 
-/// What hint mode has to show: the hints themselves, the prefix typed so
-/// far, and which hint is armed.
+/// What hint mode has to show: the hints themselves, the keys confirmed so
+/// far, and the key armed on top of them.
 struct HintView<'a> {
     hints: &'a [Hint],
     typed: &'a str,
-    armed: Option<usize>,
+    armed: Option<char>,
 }
 
 fn draw_pick_hint(
@@ -739,6 +712,8 @@ fn draw_pick_hint(
         typed,
         armed,
     } = view;
+    // What the armed key would leave behind, which is what it previews.
+    let preview = armed.map(|ch| format!("{typed}{ch}"));
     let mon = &snap.monitor;
     let w = &snap.windows[win];
     canvas.stroke_rect(
@@ -760,13 +735,26 @@ fn draw_pick_hint(
         (canvas.w, canvas.h),
         scale,
     );
-    for (i, (h, b)) in hints.iter().zip(&boxes).enumerate() {
+    for (h, b) in hints.iter().zip(&boxes) {
         if !h.label.starts_with(typed) {
             continue;
         }
-        let hot = armed == Some(i);
+        let hot = preview.as_deref().is_some_and(|p| h.label.starts_with(p));
+        // While a key is armed, what it rules out steps back rather than
+        // competing with what it keeps.
+        let fade = if preview.is_some() && !hot { 0.35 } else { 1.0 };
+        let (ring, bg, edge, text) = if hot {
+            (ARMED_RING, ARMED_BG, ARMED_EDGE, ARMED_TEXT)
+        } else {
+            (
+                HINT_RING.fade(fade),
+                HINT_BG.fade(fade),
+                HINT_EDGE.fade(fade),
+                HINT_TEXT.fade(fade),
+            )
+        };
         // Outlining every element at once is noise; the outline only earns
-        // its place once typing has narrowed the field.
+        // its place once a key has narrowed the field.
         if hot || !typed.is_empty() {
             canvas.stroke_rect(
                 ((h.rx - mon.x as f64) * scale as f64) as i32,
@@ -774,26 +762,19 @@ fn draw_pick_hint(
                 (h.rw * scale as f64) as i32,
                 (h.rh * scale as f64) as i32,
                 if hot { 2 * scale } else { scale.max(1) },
-                if hot { ARMED_RING } else { HINT_RING },
+                ring,
             );
         }
         let rem = h.label[typed.len()..].to_ascii_uppercase();
-        canvas.fill_rect(b.x, b.y, b.w, b.h, if hot { ARMED_BG } else { HINT_BG });
-        canvas.stroke_rect(
-            b.x,
-            b.y,
-            b.w,
-            b.h,
-            scale.max(1),
-            if hot { ARMED_EDGE } else { HINT_EDGE },
-        );
+        canvas.fill_rect(b.x, b.y, b.w, b.h, bg);
+        canvas.stroke_rect(b.x, b.y, b.w, b.h, scale.max(1), edge);
         canvas.text_centered(
             font,
             &rem,
             b.x as f32 + b.w as f32 / 2.0,
             b.y as f32 + b.h as f32 / 2.0,
             px,
-            if hot { ARMED_TEXT } else { HINT_TEXT },
+            text,
         );
     }
 }

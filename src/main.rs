@@ -116,10 +116,16 @@ fn elements(n: Option<usize>) -> Result<(), Box<dyn Error>> {
     let w = snap.windows.get(idx).ok_or("no such window; see --list")?;
     println!("window {}: [{}] {}", idx + 1, w.class, w.title);
     let els = atspi::clickable_elements(w.pid, &w.title)?;
+    let centers: Vec<(f64, f64)> = els
+        .iter()
+        .map(|e| (e.x + e.w / 2.0, e.y + e.h / 2.0))
+        .collect();
+    let labels = hint::labels(&centers, w.w as f64, w.h as f64);
     println!("{} clickable elements (window-relative logical):", els.len());
-    for e in &els {
+    for (e, label) in els.iter().zip(&labels) {
         println!(
-            "  {:16} at ({:.0}, {:.0}) size {:.0}x{:.0}",
+            "  {:4} {:16} at ({:.0}, {:.0}) size {:.0}x{:.0}",
+            label,
             atspi::role_name(e.role),
             e.x,
             e.y,

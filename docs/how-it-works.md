@@ -36,39 +36,49 @@ switches to that window on 1-9.
 
 ### Arming
 
-No single key press clicks anything. A key press picks a target and
-arms it: the target turns green, and pressing the same key again (or
-Enter) clicks it. Any other key picks a different target instead, so a
-mistyped hint needs no undo. This holds in both modes, and it is what
-makes the overlay usable without looking at the keyboard.
+No key press commits on its own. The first press of a key arms it:
+whatever that key would select turns green and the rest steps back.
+Pressing the same key again, or Enter, confirms it, and confirming the
+last key of a hint clicks that element. Another key moves the preview,
+Backspace undoes one press, and a key that leads nowhere is ignored.
+
+So a hint of DJ is d, d, j, j: two keys, each confirmed separately.
+This holds in both modes, and it is what makes the overlay usable
+without looking at the keyboard.
 
 ### Hint mode
 
-Every clickable element gets an amber label (`src/hint.rs`). Position
-picks the key: the three qwerty rows are laid over the elements the way
-the grid is laid over a window, so an element in the top-left corner is
-labelled near Q and one in the bottom-right near M. One key per element
-while 26 suffice; past that the key becomes a prefix and the elements
-that share it are labelled the same way again, which keeps labels short
-where the window is sparse and grows them only where it is crowded.
-Labels are prefix-free, so a complete label is never the start of
-another one.
+Every clickable element gets an amber label (`src/hint.rs`). The first
+key is where the element is: the qwerty block is laid over the window
+the way the grid is, and an element takes the key covering it, never a
+neighbour's. An element in the bottom-left corner is labelled Z and one
+in the top-right P, however the elements happen to be spread, so a
+window whose targets crowd into one strip keeps them on the keys under
+that strip instead of fanning them across the keyboard.
 
-Typing narrows the visible hints, and the press that leaves a single
-candidate arms it. Labels sit at the top-left corner of their element,
+A key covering one element is the whole label. A key covering several
+becomes their prefix, and those elements take a second key handed out
+along the group in reading order: the first key has already said where
+the group is, so the rest of the label uses the keyboard end to end
+rather than squeezing a column of elements into the three keys above
+each other. Labels are prefix-free, so a complete label is never the
+start of another one.
+
+Each confirmed key narrows the visible hints. Labels sit at the
+top-left corner of their element,
 vimium style, but a label that would land on one already placed tries
 the element's other corners and sides first. Element outlines are drawn
-only once typing has narrowed the field, since outlining everything at
-once is noise. Backspace steps back, Esc clears the typed prefix and
-then quits, Space switches to the grid for spots the tree does not
-cover.
+only once a key has narrowed the field, since outlining everything at
+once is noise. Esc drops the armed key, then the confirmed ones, then
+quits. Space switches to the grid for spots the tree does not cover.
 
 ### Grid mode
 
 The window is divided into three rows following the qwerty layout
 (`src/grid.rs`): ten tiles for q-p, nine for a-l, seven for z-m. A
-letter arms that tile, the same letter again clicks its center. Space
-switches back to hint mode when elements exist.
+letter arms that tile and the same letter again clicks its center, the
+same two presses as a one-key hint. Space switches back to hint mode
+when elements exist.
 
 ## Element discovery (AT-SPI)
 
@@ -135,7 +145,8 @@ extent, then a left button press and release.
 - `--list` prints the snapshot: monitor, layout extent, and the
   windows with their geometry, marking the focused one.
 - `--elements [N]` prints the clickable elements detected for window N,
-  or for the focused window, with roles and window-relative rectangles.
+  or for the focused window: the hint each would get, its role, and its
+  window-relative rectangle.
 - `--smoke MS [N]` renders the hint overlay for MS milliseconds without
   grabbing the keyboard, for window N or the focused window.
 - `--smoke-grid MS [N]` is the same for the letter grid,
