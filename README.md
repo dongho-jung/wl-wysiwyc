@@ -14,10 +14,12 @@ cargo build --release
 ./target/release/wl-wysiwyc
 ```
 
-Keys: in hint mode, type a label to click that element; in grid mode,
-one letter clicks that qwerty tile. `Space` switches between the two,
-`Tab` picks another window with `1`-`9`, `Backspace` edits a typed
-hint, `Esc` goes back or quits.
+Keys: type a hint to arm it, then press the same key again to click it
+(`Enter` works too), so nothing is clicked by a single keystroke. Hint
+keys follow the keyboard layout: a target in the top-left corner is
+labelled near `q`, one in the bottom-right near `m`. `Space` switches
+between hints and the letter grid, `Tab` picks another window with
+`1`-`9`, `Backspace` steps back, `Esc` backs out and then quits.
 
 Element hints need AT-SPI accessibility enabled on the system; Chromium
 additionally needs a launch flag. See

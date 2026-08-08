@@ -49,6 +49,12 @@ const HINT_BG: Color = Color::new(0.99, 0.76, 0.16, 0.96);
 const HINT_EDGE: Color = Color::new(0.35, 0.24, 0.02, 0.9);
 const HINT_TEXT: Color = Color::new(0.12, 0.08, 0.0, 1.0);
 const HINT_RING: Color = Color::new(1.0, 0.85, 0.3, 0.5);
+/// The armed target, one key press away from being clicked.
+const ARMED_BG: Color = Color::new(0.16, 0.83, 0.55, 0.98);
+const ARMED_EDGE: Color = Color::new(0.02, 0.25, 0.14, 0.95);
+const ARMED_TEXT: Color = Color::new(0.0, 0.12, 0.06, 1.0);
+const ARMED_RING: Color = Color::new(0.16, 0.90, 0.58, 0.95);
+const ARMED_FILL: Color = Color::new(0.16, 0.83, 0.55, 0.16);
 
 /// What a smoke run should render. The window index is 1-based; None means
 /// the focused window, the same one the overlay starts on.
@@ -69,6 +75,16 @@ enum Stage {
     PickWindow,
     PickTile { win: usize },
     PickHint { win: usize },
+}
+
+/// The target a key press armed. Pressing the same key again clicks it;
+/// every other key picks a different target instead.
+#[derive(Clone, Copy)]
+enum Armed {
+    /// Index into `hints`.
+    Hint { index: usize, key: char },
+    /// Grid tile, which is also the key that armed it.
+    Tile { ch: char },
 }
 
 #[derive(Clone)]
@@ -103,6 +119,7 @@ struct App {
     target: Option<(f64, f64)>,
     hints: Vec<Hint>,
     typed: String,
+    armed: Option<Armed>,
     elements_cache: HashMap<usize, Vec<Element>>,
     pending_pick: Option<usize>,
 }
@@ -162,6 +179,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         target: None,
         hints: Vec::new(),
         typed: String::new(),
+        armed: None,
         elements_cache: HashMap::new(),
         pending_pick,
     };
@@ -296,30 +314,12 @@ impl App {
     }
 
     fn handle_key(&mut self, event: KeyEvent) {
-        if event.keysym == Keysym::Tab {
-            self.pick_window();
-            return;
-        }
-        if event.keysym == Keysym::Escape {
-            match self.stage {
-                Stage::PickHint { .. } if !self.typed.is_empty() => {
-                    self.typed.clear();
-                    self.dirty = true;
-                }
-                Stage::PickTile { .. } | Stage::PickHint { .. } => {
-                    self.stage = Stage::PickWindow;
-                    self.typed.clear();
-                    self.dirty = true;
-                }
-                Stage::PickWindow => self.exit = true,
-            }
-            return;
-        }
-        if event.keysym == Keysym::BackSpace {
-            if matches!(self.stage, Stage::PickHint { .. }) && self.typed.pop().is_some() {
-                self.dirty = true;
-            }
-            return;
+        match event.keysym {
+            Keysym::Escape => return self.cancel(),
+            Keysym::BackSpace => return self.undo(),
+            Keysym::Return | Keysym::KP_Enter => return self.click_armed(),
+            Keysym::Tab => return self.pick_window(),
+            _ => {}
         }
         let Some(ch) = event.utf8.as_deref().and_then(|s| s.chars().next()) else {
             return;
@@ -341,47 +341,43 @@ impl App {
                     }
                     return;
                 }
-                if ch.is_ascii_lowercase() {
-                    let w = &self.snap.windows[win];
-                    if let Some(t) = grid::tile_for(w.w as f64, w.h as f64, ch) {
-                        self.target =
-                            Some((w.x as f64 + t.x + t.w / 2.0, w.y as f64 + t.y + t.h / 2.0));
-                        self.exit = true;
-                    }
-                }
+                self.press_tile(win, ch);
             }
             Stage::PickHint { win } => {
                 if ch == ' ' {
                     self.stage = Stage::PickTile { win };
-                    self.typed.clear();
-                    self.dirty = true;
+                    self.reset_input();
                     return;
                 }
-                if !ch.is_ascii_lowercase() {
-                    return;
-                }
-                self.typed.push(ch);
-                let mut prefix_matches = 0;
-                let mut exact: Option<(f64, f64)> = None;
-                for h in &self.hints {
-                    if h.label.starts_with(&self.typed) {
-                        prefix_matches += 1;
-                        if h.label == self.typed {
-                            exact = Some((h.cx, h.cy));
-                        }
-                    }
-                }
-                if let Some(t) = exact {
-                    self.target = Some(t);
-                    self.exit = true;
-                } else if prefix_matches == 0 {
-                    self.typed.clear();
-                    self.dirty = true;
-                } else {
-                    self.dirty = true;
-                }
+                self.press_hint(ch);
             }
         }
+    }
+
+    /// Esc unwinds one step at a time: disarm, then drop what was typed,
+    /// then quit.
+    fn cancel(&mut self) {
+        if self.armed.take().is_some() || !self.typed.is_empty() {
+            self.typed.clear();
+            self.dirty = true;
+            return;
+        }
+        self.exit = true;
+    }
+
+    /// Backspace steps back one key press: what it armed, and the character
+    /// that armed it.
+    fn undo(&mut self) {
+        let was_armed = self.armed.take().is_some();
+        if self.typed.pop().is_some() || was_armed {
+            self.dirty = true;
+        }
+    }
+
+    fn reset_input(&mut self) {
+        self.typed.clear();
+        self.armed = None;
+        self.dirty = true;
     }
 
     /// Leave the window the overlay opened on and choose another one by
@@ -391,8 +387,93 @@ impl App {
             return;
         }
         self.stage = Stage::PickWindow;
-        self.typed.clear();
+        self.reset_input();
+    }
+
+    fn click(&mut self, target: (f64, f64)) {
+        self.target = Some(target);
+        self.exit = true;
+    }
+
+    /// Click whatever is armed. Enter does this; so does pressing the key
+    /// that armed it a second time.
+    fn click_armed(&mut self) {
+        match self.armed {
+            Some(Armed::Hint { index, .. }) => {
+                let h = &self.hints[index];
+                self.click((h.cx, h.cy));
+            }
+            Some(Armed::Tile { ch }) => {
+                let Stage::PickTile { win } = self.stage else {
+                    return;
+                };
+                let w = &self.snap.windows[win];
+                if let Some(t) = grid::tile_for(w.w as f64, w.h as f64, ch) {
+                    self.click((w.x as f64 + t.x + t.w / 2.0, w.y as f64 + t.y + t.h / 2.0));
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn press_tile(&mut self, win: usize, ch: char) {
+        if !ch.is_ascii_lowercase() {
+            return;
+        }
+        let w = &self.snap.windows[win];
+        if grid::tile_for(w.w as f64, w.h as f64, ch).is_none() {
+            return;
+        }
+        if matches!(self.armed, Some(Armed::Tile { ch: armed }) if armed == ch) {
+            self.click_armed();
+            return;
+        }
+        self.armed = Some(Armed::Tile { ch });
         self.dirty = true;
+    }
+
+    /// One key press narrows the visible hints; the press that leaves a
+    /// single candidate arms it, and repeating that key clicks it. Any other
+    /// key starts a new label instead, so a mistyped hint needs no undo.
+    fn press_hint(&mut self, ch: char) {
+        if !ch.is_ascii_lowercase() {
+            return;
+        }
+        if matches!(self.armed, Some(Armed::Hint { key, .. }) if key == ch) {
+            self.click_armed();
+            return;
+        }
+        if self.armed.take().is_some() {
+            self.typed.clear();
+        }
+        self.typed.push(ch);
+        if !self.hints.iter().any(|h| h.label.starts_with(&self.typed)) {
+            self.typed.clear();
+            self.typed.push(ch);
+            if !self.hints.iter().any(|h| h.label.starts_with(&self.typed)) {
+                self.typed.clear();
+            }
+        }
+        self.armed = self
+            .only_candidate()
+            .map(|index| Armed::Hint { index, key: ch });
+        self.dirty = true;
+    }
+
+    /// The one hint left matching what was typed, if exactly one is left.
+    fn only_candidate(&self) -> Option<usize> {
+        if self.typed.is_empty() {
+            return None;
+        }
+        let mut it = self
+            .hints
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.label.starts_with(&self.typed));
+        match (it.next(), it.next()) {
+            (Some((i, _)), None) => Some(i),
+            _ => None,
+        }
     }
 
     /// A window was picked: query its clickable elements (with a hard timeout
@@ -424,8 +505,7 @@ impl App {
         }
         if self.elements_cache.get(&win).is_none_or(Vec::is_empty) {
             self.stage = Stage::PickTile { win };
-            self.typed.clear();
-            self.dirty = true;
+            self.reset_input();
         } else {
             self.enter_hint_stage(win);
         }
@@ -452,9 +532,8 @@ impl App {
                 cy: w.y as f64 + cy,
             })
             .collect();
-        self.typed.clear();
         self.stage = Stage::PickHint { win };
-        self.dirty = true;
+        self.reset_input();
     }
 
     fn draw(&mut self) {
@@ -481,17 +560,23 @@ impl App {
         match self.stage {
             Stage::PickWindow => draw_pick_window(&self.snap, &self.font, &mut canvas, scale),
             Stage::PickTile { win } => {
-                draw_pick_tile(&self.snap, win, &self.font, &mut canvas, scale)
+                let armed = match self.armed {
+                    Some(Armed::Tile { ch }) => Some(ch),
+                    _ => None,
+                };
+                draw_pick_tile(&self.snap, win, armed, &self.font, &mut canvas, scale)
             }
-            Stage::PickHint { win } => draw_pick_hint(
-                &self.snap,
-                win,
-                &self.hints,
-                &self.typed,
-                &self.font,
-                &mut canvas,
-                scale,
-            ),
+            Stage::PickHint { win } => {
+                let view = HintView {
+                    hints: &self.hints,
+                    typed: &self.typed,
+                    armed: match self.armed {
+                        Some(Armed::Hint { index, .. }) => Some(index),
+                        _ => None,
+                    },
+                };
+                draw_pick_hint(&self.snap, win, view, &self.font, &mut canvas, scale)
+            }
         }
         let surface = layer.wl_surface();
         surface.set_buffer_scale(scale);
@@ -528,7 +613,14 @@ fn draw_pick_window(snap: &Snapshot, font: &Font, canvas: &mut Canvas, scale: i3
     }
 }
 
-fn draw_pick_tile(snap: &Snapshot, win: usize, font: &Font, canvas: &mut Canvas, scale: i32) {
+fn draw_pick_tile(
+    snap: &Snapshot,
+    win: usize,
+    armed: Option<char>,
+    font: &Font,
+    canvas: &mut Canvas,
+    scale: i32,
+) {
     let mon = &snap.monitor;
     let w = &snap.windows[win];
     let rx = (w.x - mon.x) * scale;
@@ -540,8 +632,16 @@ fn draw_pick_tile(snap: &Snapshot, win: usize, font: &Font, canvas: &mut Canvas,
         let ty = ry + t.y.round() as i32;
         let tw = t.w.round() as i32;
         let th = t.h.round() as i32;
-        canvas.fill_rect(tx, ty, tw, th, TILE_BG);
-        canvas.stroke_rect(tx, ty, tw, th, scale.max(1), TILE_BORDER);
+        let hot = armed == Some(t.ch);
+        canvas.fill_rect(tx, ty, tw, th, if hot { ARMED_FILL } else { TILE_BG });
+        canvas.stroke_rect(
+            tx,
+            ty,
+            tw,
+            th,
+            if hot { 3 * scale } else { scale.max(1) },
+            if hot { ARMED_RING } else { TILE_BORDER },
+        );
         let px = (t.w.min(t.h) as f32 * 0.42).min(64.0 * scale as f32);
         canvas.text_centered(
             font,
@@ -549,20 +649,32 @@ fn draw_pick_tile(snap: &Snapshot, win: usize, font: &Font, canvas: &mut Canvas,
             tx as f32 + tw as f32 / 2.0,
             ty as f32 + th as f32 / 2.0,
             px,
-            TEXT,
+            if hot { ARMED_RING } else { TEXT },
         );
     }
+}
+
+/// What hint mode has to show: the hints themselves, the prefix typed so
+/// far, and which hint is armed.
+struct HintView<'a> {
+    hints: &'a [Hint],
+    typed: &'a str,
+    armed: Option<usize>,
 }
 
 fn draw_pick_hint(
     snap: &Snapshot,
     win: usize,
-    hints: &[Hint],
-    typed: &str,
+    view: HintView,
     font: &Font,
     canvas: &mut Canvas,
     scale: i32,
 ) {
+    let HintView {
+        hints,
+        typed,
+        armed,
+    } = view;
     let mon = &snap.monitor;
     let w = &snap.windows[win];
     canvas.stroke_rect(
@@ -575,29 +687,44 @@ fn draw_pick_hint(
     );
     let px = 15.0 * scale as f32;
     let pad = 4 * scale;
-    for h in hints {
+    for (i, h) in hints.iter().enumerate() {
         if !h.label.starts_with(typed) {
             continue;
         }
+        let hot = armed == Some(i);
         let ex = ((h.rx - mon.x as f64) * scale as f64) as i32;
         let ey = ((h.ry - mon.y as f64) * scale as f64) as i32;
         let ew = (h.rw * scale as f64) as i32;
         let eh = (h.rh * scale as f64) as i32;
-        canvas.stroke_rect(ex, ey, ew, eh, scale.max(1), HINT_RING);
+        canvas.stroke_rect(
+            ex,
+            ey,
+            ew,
+            eh,
+            if hot { 2 * scale } else { scale.max(1) },
+            if hot { ARMED_RING } else { HINT_RING },
+        );
         let rem = h.label[typed.len()..].to_ascii_uppercase();
         let bw = draw::text_width(font, &rem, px) as i32 + 2 * pad;
         let bh = px as i32 + 2 * pad;
         let bx = ex.clamp(0, (canvas.w - bw).max(0));
         let by = (ey - bh / 2).clamp(0, (canvas.h - bh).max(0));
-        canvas.fill_rect(bx, by, bw, bh, HINT_BG);
-        canvas.stroke_rect(bx, by, bw, bh, scale.max(1), HINT_EDGE);
+        canvas.fill_rect(bx, by, bw, bh, if hot { ARMED_BG } else { HINT_BG });
+        canvas.stroke_rect(
+            bx,
+            by,
+            bw,
+            bh,
+            scale.max(1),
+            if hot { ARMED_EDGE } else { HINT_EDGE },
+        );
         canvas.text_centered(
             font,
             &rem,
             bx as f32 + bw as f32 / 2.0,
             by as f32 + bh as f32 / 2.0,
             px,
-            HINT_TEXT,
+            if hot { ARMED_TEXT } else { HINT_TEXT },
         );
     }
 }

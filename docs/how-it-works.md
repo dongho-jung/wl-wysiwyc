@@ -34,6 +34,14 @@ the overlay opens in hint mode; otherwise it falls back to the grid.
 Tab opens the window picker, which draws a number on every window and
 switches to that window on 1-9.
 
+### Arming
+
+No single key press clicks anything. A key press picks a target and
+arms it: the target turns green, and pressing the same key again (or
+Enter) clicks it. Any other key picks a different target instead, so a
+mistyped hint needs no undo. This holds in both modes, and it is what
+makes the overlay usable without looking at the keyboard.
+
 ### Hint mode
 
 Every clickable element gets an amber label (`src/hint.rs`). Position
@@ -46,17 +54,17 @@ where the window is sparse and grows them only where it is crowded.
 Labels are prefix-free, so a complete label is never the start of
 another one.
 
-Typing narrows the visible hints; completing a label clicks the center
-of that element. Backspace edits the typed prefix,
-Esc clears it (then returns to the window picker), Space switches to
-the grid for spots the tree does not cover.
+Typing narrows the visible hints, and the press that leaves a single
+candidate arms it. Backspace steps back, Esc clears the typed prefix
+and then quits, Space switches to the grid for spots the tree does not
+cover.
 
 ### Grid mode
 
 The window is divided into three rows following the qwerty layout
-(`src/grid.rs`): ten tiles for q-p, nine for a-l, seven for z-m. One
-letter clicks that tile's center. Space switches back to hint mode
-when elements exist.
+(`src/grid.rs`): ten tiles for q-p, nine for a-l, seven for z-m. A
+letter arms that tile, the same letter again clicks its center. Space
+switches back to hint mode when elements exist.
 
 ## Element discovery (AT-SPI)
 
