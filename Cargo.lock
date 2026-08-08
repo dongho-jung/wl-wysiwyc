@@ -1176,8 +1176,10 @@ dependencies = [
  "serde",
  "serde_json",
  "smithay-client-toolkit",
+ "wayland-backend",
  "wayland-client",
  "wayland-protocols-wlr",
+ "wayland-scanner",
  "zbus",
 ]
 

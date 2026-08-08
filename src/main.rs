@@ -4,6 +4,7 @@ mod grid;
 mod hint;
 mod hypr;
 mod overlay;
+mod shortcuts;
 
 use std::error::Error;
 use std::time::Duration;

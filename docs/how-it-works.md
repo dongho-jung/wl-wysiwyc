@@ -20,12 +20,10 @@ and the bounding box of the whole output layout.
 
 `src/overlay.rs` connects to the compositor with smithay-client-toolkit
 and creates one wlr-layer-shell surface on the overlay layer, anchored
-to all edges of the focused output, with exclusive keyboard
-interactivity and an empty input region. Taking no pointer input
-matters: a surface that accepts it pulls the pointer off the window
-underneath, which sees the pointer leave, and a panel held open by
-hover folds up as the overlay opens. Keyboard focus comes from the
-layer's interactivity, so nothing is lost by giving pointer input up.
+to all edges of the focused output, with an empty input region. Taking
+no pointer input matters: a surface that accepts it pulls the pointer
+off the window underneath, which sees the pointer leave, and a panel
+held open by hover folds up as the overlay opens.
 
 Rendering is plain software drawing into a shared-memory Argb8888
 buffer (`src/draw.rs`): premultiplied alpha and glyphs rasterized with
@@ -41,6 +39,35 @@ Startup queries the focused window's clickable elements over AT-SPI
 the overlay opens in hint mode; otherwise it falls back to the grid.
 Tab opens the window picker, which draws a number on every window and
 switches to that window on 1-9.
+
+### Keys
+
+The overlay does not hold the keyboard either, for the same reason. A
+layer surface that asks for it takes activation away from the window
+underneath, and a window that loses activation drops its hover state:
+Chromium folds up a menu that was only open because the pointer was on
+it, so the hints again end up describing a window that is no longer
+there.
+
+The keys come from the compositor instead. `src/shortcuts.rs` registers
+one Hyprland global shortcut per key the overlay listens for, and
+`src/hypr.rs` defines a submap binding each key to its shortcut, then
+enters it. Triggering a shortcut delivers an event without touching
+focus, so the window under the overlay stays exactly as it was, pointer
+and activation and hover included.
+
+The submap is defined once per Hyprland session: defining it twice
+binds every key twice, and a key bound twice would arm and confirm in
+one press. It is left on the way out, and a watchdog process resets it
+if this one is killed rather than asked to quit, since a killed process
+runs no destructors and every key in the submap points at a client that
+is gone. Hyprland takes its config either as Lua or in its own
+language, and only one of the two answers a given call, so both forms
+are tried.
+
+A compositor without the protocol, or a submap that will not take,
+falls back to holding the keyboard the ordinary way, hover cost and
+all.
 
 ### Arming
 

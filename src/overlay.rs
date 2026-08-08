@@ -3,6 +3,11 @@ use crate::draw::{self, Canvas, Color, Rect};
 use crate::grid;
 use crate::hint;
 use crate::hypr::Snapshot;
+use crate::shortcuts::{
+    protocol::hyprland_global_shortcut_v1::{self, HyprlandGlobalShortcutV1},
+    protocol::hyprland_global_shortcuts_manager_v1::HyprlandGlobalShortcutsManagerV1,
+    Key, Shortcuts,
+};
 use fontdue::Font;
 use std::collections::HashMap;
 use smithay_client_toolkit::{
@@ -219,7 +224,14 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
     layer.set_anchor(Anchor::TOP | Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT);
     layer.set_size(0, 0);
     layer.set_exclusive_zone(-1);
-    layer.set_keyboard_interactivity(if smoke.is_some() {
+    // Keys come from the compositor as global shortcuts when it speaks that
+    // protocol. Holding the keyboard ourselves is the fallback, and it costs
+    // the window its activation, which costs it any menu open on hover.
+    let shortcuts = match smoke {
+        Some(_) => None,
+        None => Shortcuts::bind(&globals, &qh),
+    };
+    layer.set_keyboard_interactivity(if smoke.is_some() || shortcuts.is_some() {
         KeyboardInteractivity::None
     } else {
         KeyboardInteractivity::Exclusive
@@ -248,7 +260,9 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
     }
 
     // Unmap the overlay before injecting the click so the click reaches
-    // the window below instead of this surface.
+    // the window below instead of this surface. Dropping the shortcuts first
+    // puts the keyboard back the way it was.
+    drop(shortcuts);
     app.layer.take();
     queue.roundtrip(&mut app)?;
 
@@ -333,24 +347,25 @@ impl App {
         None
     }
 
-    fn handle_key(&mut self, event: KeyEvent) {
-        match event.keysym {
-            Keysym::Escape => return self.cancel(),
-            Keysym::BackSpace => return self.undo(),
-            Keysym::Return | Keysym::KP_Enter => return self.commit_key(),
-            Keysym::Tab => return self.pick_window(),
-            _ => {}
-        }
-        let Some(ch) = event.utf8.as_deref().and_then(|s| s.chars().next()) else {
-            return;
+    fn press(&mut self, key: Key) {
+        let ch = match key {
+            Key::Escape => return self.cancel(),
+            Key::Backspace => return self.undo(),
+            Key::Enter => return self.commit_key(),
+            Key::Tab => return self.pick_window(),
+            Key::Char(ch) => ch.to_ascii_lowercase(),
         };
-        let ch = ch.to_ascii_lowercase();
         match self.stage {
             Stage::PickWindow => {
                 if let Some(d) = ch.to_digit(10) {
                     let idx = d as usize;
                     if (1..=self.snap.windows.len()).contains(&idx) {
+                        // Act on the pick here rather than back in the event
+                        // loop: reading the window's elements takes long
+                        // enough for the next key to arrive, and it would be
+                        // read against the stage this one is leaving.
                         self.pending_pick = Some(idx - 1);
+                        self.process_pending_pick();
                     }
                 }
             }
@@ -952,6 +967,37 @@ fn draw_label_text(
     }
 }
 
+/// The key a wl_keyboard event stands for. Only used on the fallback path,
+/// where the overlay holds the keyboard itself.
+fn key_of(event: &KeyEvent) -> Option<Key> {
+    match event.keysym {
+        Keysym::Escape => Some(Key::Escape),
+        Keysym::BackSpace => Some(Key::Backspace),
+        Keysym::Return | Keysym::KP_Enter => Some(Key::Enter),
+        Keysym::Tab => Some(Key::Tab),
+        _ => event
+            .utf8
+            .as_deref()
+            .and_then(|s| s.chars().next())
+            .map(Key::Char),
+    }
+}
+
+impl Dispatch<HyprlandGlobalShortcutV1, Key> for App {
+    fn event(
+        state: &mut Self,
+        _: &HyprlandGlobalShortcutV1,
+        event: hyprland_global_shortcut_v1::Event,
+        key: &Key,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if matches!(event, hyprland_global_shortcut_v1::Event::Pressed { .. }) {
+            state.press(*key);
+        }
+    }
+}
+
 impl CompositorHandler for App {
     fn scale_factor_changed(
         &mut self,
@@ -1078,7 +1124,9 @@ impl KeyboardHandler for App {
         _: u32,
         event: KeyEvent,
     ) {
-        self.handle_key(event);
+        if let Some(key) = key_of(&event) {
+            self.press(key);
+        }
     }
     fn release_key(
         &mut self,
@@ -1122,5 +1170,6 @@ delegate_keyboard!(App);
 delegate_layer!(App);
 delegate_registry!(App);
 wayland_client::delegate_noop!(App: ignore wl_region::WlRegion);
+wayland_client::delegate_noop!(App: ignore HyprlandGlobalShortcutsManagerV1);
 wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerManagerV1);
 wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerV1);
