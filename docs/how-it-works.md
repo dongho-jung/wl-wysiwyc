@@ -46,8 +46,8 @@ Backspace undoes one press, and a key that leads nowhere is ignored.
 
 An armed key is drawn pressed inside every label it would keep, a dark
 cap over that one character, and those labels turn green. One that
-leaves a single candidate also earns a ring and a glow around the
-element, which a press that only narrows the field does not get.
+leaves a single candidate also rings and glows the element itself,
+which a press that only narrows the field does not.
 
 What an armed key would rule out is left alone. Nothing is confirmed
 yet, so dimming those labels would answer a question the press has only
@@ -81,12 +81,15 @@ each other. Labels are prefix-free, so a complete label is never the
 start of another one.
 
 Each confirmed key narrows the visible hints. Labels sit at the
-top-left corner of their element, vimium style, but a label that would
-land on one already placed, or right up against it, tries the element's
-other corners and sides first. Element outlines are drawn only once a
-key has narrowed the field, since outlining everything at once is
-noise. Esc drops the armed key, then the confirmed ones, then quits.
-Space switches to the grid for spots the tree does not cover.
+top-left corner of their element, vimium style, unless the element is
+small enough for the label to swallow it, in which case the label goes
+beside it: a rail of icons is unusable when every icon is under a
+label. Either way, a label that would land on one already placed, or
+right up against it, tries the element's other sides first. Only the
+element about to be clicked is outlined, since ringing every candidate
+turns a dense corner of a window into a mess of boxes. Esc drops the
+armed key, then the confirmed ones, then quits. Space switches to the
+grid for spots the tree does not cover.
 
 ### Grid mode
 

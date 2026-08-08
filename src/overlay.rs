@@ -62,15 +62,15 @@ const ARMED_CAP: Color = Color::new(0.02, 0.24, 0.15, 0.92);
 const ARMED_CAP_TEXT: Color = Color::new(0.55, 1.0, 0.82, 1.0);
 
 /// Label text size and the space around it, both in unscaled pixels.
-const LABEL_PX: f32 = 13.0;
-const LABEL_PAD_X: f32 = 5.0;
-const LABEL_PAD_Y: f32 = 4.0;
+const LABEL_PX: f32 = 11.5;
+const LABEL_PAD_X: f32 = 4.5;
+const LABEL_PAD_Y: f32 = 3.0;
 /// Clearance between two labels, so a crowded window reads as separate
 /// labels rather than one block of colour.
 const LABEL_GAP: i32 = 3;
 /// Space between the characters of a label, so the pressed key wears its
 /// cap without touching the character next to it.
-const LABEL_TRACK: f32 = 3.0;
+const LABEL_TRACK: f32 = 2.5;
 
 /// What a smoke run should render. The window index is 1-based; None means
 /// the focused window, the same one the overlay starts on.
@@ -731,11 +731,15 @@ impl LabelBox {
     }
 }
 
-/// Lay out one box per hint. Labels want the top-left corner of their
-/// element, vimium style, but a dense tree stacks them on top of each other,
-/// so a box that would land on an earlier one, or right up against it, tries
-/// the element's other corners and sides first. Placement covers every hint,
-/// not just the visible ones, so labels stay put while a prefix is typed.
+/// Lay out one box per hint.
+///
+/// A label large enough to swallow its target goes beside it instead of over
+/// it: a rail of small icons is unusable when every icon is under a label.
+/// Bigger elements keep the vimium placement, a corner of the element, which
+/// costs them nothing. Either way a box that would land on one already
+/// placed, or right up against it, tries the element's other sides first.
+/// Placement covers every hint, not just the visible ones, so labels stay put
+/// while a prefix is typed.
 fn place_labels(
     hints: &[Hint],
     font: &Font,
@@ -759,14 +763,27 @@ fn place_labels(
         let bw = (label_width(font, &h.label.to_ascii_uppercase(), px, scale as f32) as i32
             + 2 * pad_x)
             .max(bh);
-        let spots = [
-            (ex, ey - bh / 2),
-            (ex + ew - bw, ey - bh / 2),
-            (ex, ey + eh - bh / 2),
-            (ex + ew - bw, ey + eh - bh / 2),
-            (ex - bw, ey + (eh - bh) / 2),
-            (ex + ew, ey + (eh - bh) / 2),
-        ];
+        let (mid_x, mid_y) = (ex + (ew - bw) / 2, ey + (eh - bh) / 2);
+        let spots = if ew < 2 * bw || eh < 2 * bh {
+            // Small target: everything here clears it.
+            [
+                (ex + ew + gap, mid_y),
+                (ex - bw - gap, mid_y),
+                (mid_x, ey - bh - gap),
+                (mid_x, ey + eh + gap),
+                (ex + ew + gap, ey - bh - gap),
+                (ex - bw - gap, ey + eh + gap),
+            ]
+        } else {
+            [
+                (ex, ey - bh / 2),
+                (ex + ew - bw, ey - bh / 2),
+                (ex, ey + eh - bh / 2),
+                (ex + ew - bw, ey + eh - bh / 2),
+                (ex - bw - gap, mid_y),
+                (ex + ew + gap, mid_y),
+            ]
+        };
         let fit = |(x, y): (i32, i32)| LabelBox {
             x: x.clamp(0, (canvas.0 - bw).max(0)),
             y: y.clamp(0, (canvas.1 - bh).max(0)),
@@ -851,27 +868,20 @@ fn draw_pick_hint(
             } else {
                 (HINT_RING, HINT_BG, HINT_EDGE, HINT_TEXT)
             };
-            // Outlining every element at once is noise; the outline only
-            // earns its place once a key has narrowed the field.
-            if hot || !typed.is_empty() {
+            // Only the element about to be clicked is outlined. Ringing
+            // every candidate turns a dense corner of a window into a mess
+            // of boxes, and the labels already say which ones are left.
+            if hot && clinches {
                 let el = Rect::new(
                     ((h.rx - mon.x as f64) * scale as f64) as f32,
                     ((h.ry - mon.y as f64) * scale as f64) as f32,
                     (h.rw * scale as f64) as f32,
                     (h.rh * scale as f64) as f32,
                 );
-                if hot && clinches {
-                    canvas.round_rect_shadow(el, 4.0 * s, 6.0 * s, ARMED_GLOW.fade(0.45));
-                }
-                let t = if hot && clinches { 2.0 * s } else { s };
-                canvas.round_rect_outline(el, 4.0 * s, t, ring);
+                canvas.round_rect_shadow(el, 4.0 * s, 6.0 * s, ARMED_GLOW.fade(0.45));
+                canvas.round_rect_outline(el, 4.0 * s, 2.0 * s, ring);
             }
-            // An armed label grows a little, on top of turning green.
-            let r = if hot {
-                b.rect().grow(1.5 * s)
-            } else {
-                b.rect()
-            };
+            let r = b.rect();
             let radius = r.h * 0.3;
             if hot && clinches {
                 canvas.round_rect_shadow(r, radius, 7.0 * s, ARMED_GLOW);
