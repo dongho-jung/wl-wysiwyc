@@ -171,12 +171,20 @@ extent, then a left button press and release.
 - `--smoke-grid MS [N]` is the same for the letter grid,
   `--smoke-pick MS` for the window picker.
 - `--render FILE [N [KEYS]]` writes what the overlay would draw to a
-  binary PPM, over flat grey, without showing anything on screen. KEYS
+  binary PAM, alpha and all, without showing anything on screen. KEYS
   is a run of presses, all but the last confirmed and the last one
-  armed, so `--render out.ppm 2 qw` is what the overlay looks like with
-  Q confirmed and W armed; a trailing `.` confirms them all and arms
-  nothing. The only way to see an armed overlay without holding the
-  keyboard, and it leaves the desktop alone.
+  armed, so `--render out.pam 2 qw` is the overlay with Q confirmed and
+  W armed; a trailing `.` confirms them all and arms nothing. Laid over
+  a screenshot it is exactly what would have been on screen:
+
+  ```
+  grim -o HDMI-A-1 desk.png
+  wl-wysiwyc --render over.pam 2 q
+  ffmpeg -i desk.png -i over.pam -filter_complex "[0][1]overlay" out.png
+  ```
+
+  This is the only way to look at an armed overlay, since the smoke
+  runs do not take the keyboard, and it leaves the desktop alone.
 - `--move-test X Y` moves the cursor to global (X, Y) through the
   virtual pointer without clicking. Verifies coordinate mapping.
 
