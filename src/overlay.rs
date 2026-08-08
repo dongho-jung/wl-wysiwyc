@@ -501,25 +501,7 @@ impl App {
 
     fn enter_hint_stage(&mut self, win: usize) {
         let els = self.elements_cache.get(&win).cloned().unwrap_or_default();
-        let w = &self.snap.windows[win];
-        let centers: Vec<(f64, f64)> = els
-            .iter()
-            .map(|e| (e.x + e.w / 2.0, e.y + e.h / 2.0))
-            .collect();
-        self.hints = els
-            .iter()
-            .zip(centers.iter())
-            .zip(hint::labels(&centers, w.w as f64, w.h as f64))
-            .map(|((e, &(cx, cy)), label)| Hint {
-                label,
-                rx: w.x as f64 + e.x,
-                ry: w.y as f64 + e.y,
-                rw: e.w,
-                rh: e.h,
-                cx: w.x as f64 + cx,
-                cy: w.y as f64 + cy,
-            })
-            .collect();
+        self.hints = hints_for(&self.snap.windows[win], &els);
         self.stage = Stage::PickHint { win };
         self.reset_input();
     }
@@ -568,6 +550,70 @@ impl App {
         surface.damage_buffer(0, 0, bw, bh);
         surface.commit();
     }
+}
+
+/// Label a window's elements and place them in global coordinates.
+fn hints_for(w: &crate::hypr::Window, els: &[Element]) -> Vec<Hint> {
+    let centers: Vec<(f64, f64)> = els
+        .iter()
+        .map(|e| (e.x + e.w / 2.0, e.y + e.h / 2.0))
+        .collect();
+    els.iter()
+        .zip(centers.iter())
+        .zip(hint::labels(&centers, w.w as f64, w.h as f64))
+        .map(|((e, &(cx, cy)), label)| Hint {
+            label,
+            rx: w.x as f64 + e.x,
+            ry: w.y as f64 + e.y,
+            rw: e.w,
+            rh: e.h,
+            cx: w.x as f64 + cx,
+            cy: w.y as f64 + cy,
+        })
+        .collect()
+}
+
+/// Draw what the overlay would show into a plain buffer instead of onto the
+/// screen, and return it with its size. `keys` is a run of key presses: all
+/// but the last are confirmed, the last one is armed. Debugging aid, and the
+/// only way to look at an armed overlay without holding the keyboard.
+pub fn render(
+    snap: &Snapshot,
+    win: usize,
+    keys: &str,
+) -> Result<(Vec<u8>, i32, i32), Box<dyn Error>> {
+    let font = draw::load_font()?;
+    let scale = (snap.monitor.scale.ceil() as i32).max(1);
+    let (bw, bh) = (
+        snap.monitor.logical_w * scale,
+        snap.monitor.logical_h * scale,
+    );
+    let mut buf = vec![0u8; (bw * bh * 4) as usize];
+    let mut canvas = Canvas {
+        buf: &mut buf,
+        w: bw,
+        h: bh,
+    };
+    canvas.clear(DIM);
+    let w = snap.windows.get(win).ok_or("no such window; see --list")?;
+    let els = atspi::clickable_elements(w.pid, &w.title).unwrap_or_else(|e| {
+        eprintln!("atspi: {e}");
+        Vec::new()
+    });
+    let mut typed = keys.to_string();
+    let armed = typed.pop();
+    if els.is_empty() {
+        draw_pick_tile(snap, win, armed, &font, &mut canvas, scale);
+    } else {
+        let hints = hints_for(w, &els);
+        let view = HintView {
+            hints: &hints,
+            typed: &typed,
+            armed,
+        };
+        draw_pick_hint(snap, win, view, &font, &mut canvas, scale);
+    }
+    Ok((buf, bw, bh))
 }
 
 fn draw_pick_window(snap: &Snapshot, font: &Font, canvas: &mut Canvas, scale: i32) {

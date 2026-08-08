@@ -159,6 +159,12 @@ extent, then a left button press and release.
   grabbing the keyboard, for window N or the focused window.
 - `--smoke-grid MS [N]` is the same for the letter grid,
   `--smoke-pick MS` for the window picker.
+- `--render FILE [N [KEYS]]` writes what the overlay would draw to a
+  binary PPM, over flat grey, without showing anything on screen. KEYS
+  is a run of presses, all but the last confirmed and the last one
+  armed, so `--render out.ppm 2 qw` is what the overlay looks like with
+  Q confirmed and W armed. The only way to see an armed overlay without
+  holding the keyboard, and it leaves the desktop alone.
 - `--move-test X Y` moves the cursor to global (X, Y) through the
   virtual pointer without clicking. Verifies coordinate mapping.
 

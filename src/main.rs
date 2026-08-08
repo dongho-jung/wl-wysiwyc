@@ -24,6 +24,11 @@ Usage:
   wl-wysiwyc --smoke-grid MS [N]
                              like --smoke but shows the letter grid
   wl-wysiwyc --smoke-pick MS like --smoke but shows the window picker
+  wl-wysiwyc --render FILE [N [KEYS]]
+                             write what the overlay would draw to FILE as a
+                             PPM, without showing anything. KEYS is a run of
+                             presses: all but the last confirmed, the last
+                             one armed (debugging aid)
   wl-wysiwyc --move-test X Y move the cursor to global (X, Y) through the
                              virtual pointer, no click (debugging aid)
   wl-wysiwyc --help          show this help
@@ -66,6 +71,10 @@ fn run() -> Result<(), Box<dyn Error>> {
             interactive(Some(smoke(1, view)?))
         }
         Some("--smoke-pick") => interactive(Some(smoke(1, overlay::SmokeView::Picker)?)),
+        Some("--render") => {
+            let path = args.get(1).ok_or("--render needs a file to write")?;
+            render(path, opt_window(2)?, args.get(3).map_or("", String::as_str))
+        }
         Some("--move-test") => {
             let x: f64 = args.get(1).ok_or("--move-test needs X and Y")?.parse()?;
             let y: f64 = args.get(2).ok_or("--move-test needs X and Y")?.parse()?;
@@ -133,6 +142,33 @@ fn elements(n: Option<usize>) -> Result<(), Box<dyn Error>> {
             e.h
         );
     }
+    Ok(())
+}
+
+/// Write what the overlay would draw to a binary PPM, over a flat grey
+/// stand-in for the window under it. Nothing is shown on screen, so the
+/// look of a hint or an armed key can be checked while the desktop is in
+/// use.
+fn render(path: &str, n: Option<usize>, keys: &str) -> Result<(), Box<dyn Error>> {
+    const BACKDROP: [u8; 3] = [0xd6, 0xd6, 0xd8];
+    let snap = hypr::snapshot()?;
+    let idx = match n {
+        Some(n) => n.checked_sub(1).ok_or("window numbers start at 1")?,
+        None => snap.focused,
+    };
+    let win = snap.windows.get(idx).ok_or("no such window; see --list")?;
+    println!("window {}: [{}] {}", idx + 1, win.class, win.title);
+    let (buf, w, h) = overlay::render(&snap, idx, keys)?;
+    let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
+    // The overlay is premultiplied Argb8888 in memory order B, G, R, A.
+    for px in buf.chunks_exact(4) {
+        let inv = 1.0 - px[3] as f32 / 255.0;
+        for (i, back) in [2usize, 1, 0].into_iter().zip(BACKDROP) {
+            out.push((px[i] as f32 + back as f32 * inv).round().min(255.0) as u8);
+        }
+    }
+    std::fs::write(path, out)?;
+    println!("wrote {path}: {w}x{h}");
     Ok(())
 }
 
