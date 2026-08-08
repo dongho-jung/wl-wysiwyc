@@ -15,6 +15,74 @@ fn key_at(x: f64, y: f64) -> usize {
     ROWS[..r].iter().map(|s| s.chars().count()).sum::<usize>() + c
 }
 
+/// Where a key sits on the block, both axes normalized, so keys can be
+/// compared to each other and to element positions.
+fn key_pos(k: usize) -> (f64, f64) {
+    let mut seen = 0;
+    for (r, row) in ROWS.iter().enumerate() {
+        let cols = row.chars().count();
+        if k < seen + cols {
+            return (
+                (k - seen) as f64 / cols as f64 + 0.5 / cols as f64,
+                (r as f64 + 0.5) / ROWS.len() as f64,
+            );
+        }
+        seen += cols;
+    }
+    (0.5, 0.5)
+}
+
+/// How many elements one key can hold and still tell them apart with a
+/// single further key. Past this the label would need a third key, which is
+/// worse than moving the overflow one key over.
+const PER_KEY: usize = 26;
+
+/// Move the overflow of any crowded key to the nearest key with room.
+///
+/// The first key is meant to say where its element is, so nothing moves while
+/// its own key can hold it. A strip of forty icons down one edge overruns the
+/// two or three keys covering that edge though, and the choice there is
+/// between a third key on every one of them and a short hop to a neighbour.
+/// The hop wins: it keeps every label two keys long and only the overflow
+/// moves, to the key nearest the element it is leaving.
+fn relieve_crowding(norm: &[(f64, f64)], cells: &mut [Vec<usize>]) {
+    loop {
+        let Some(from) = cells.iter().position(|c| c.len() > PER_KEY) else {
+            return;
+        };
+        let (fx, fy) = key_pos(from);
+        let Some(to) = (0..cells.len())
+            .filter(|&k| cells[k].len() < PER_KEY)
+            .min_by(|&a, &b| {
+                let d = |k: usize| {
+                    let (x, y) = key_pos(k);
+                    (x - fx).powi(2) + (y - fy).powi(2)
+                };
+                d(a).total_cmp(&d(b))
+            })
+        else {
+            return; // Every key is full: the window has more targets than
+                    // two keys can name, and suffixes() takes it from here.
+        };
+        // Send whichever element already sits closest to the key taking it.
+        let (tx, ty) = key_pos(to);
+        let at = cells[from]
+            .iter()
+            .enumerate()
+            .min_by(|(_, &a), (_, &b)| {
+                let d = |i: usize| {
+                    let (x, y) = norm[i];
+                    (x - tx).powi(2) + (y - ty).powi(2)
+                };
+                d(a).total_cmp(&d(b))
+            })
+            .map(|(at, _)| at)
+            .unwrap_or(0);
+        let moved = cells[from].remove(at);
+        cells[to].push(moved);
+    }
+}
+
 /// Order a group the way it reads: top to bottom, then left to right.
 fn reading_order(centers: &[(f64, f64)], group: &[usize]) -> Vec<usize> {
     let mut out = group.to_vec();
@@ -64,10 +132,15 @@ pub fn labels(centers: &[(f64, f64)], w: f64, h: f64) -> Vec<String> {
     let mut out = vec![String::new(); centers.len()];
     let (w, h) = (w.max(1.0), h.max(1.0));
     let keys = keys();
+    let norm: Vec<(f64, f64)> = centers
+        .iter()
+        .map(|&(x, y)| ((x / w).clamp(0.0, 1.0), (y / h).clamp(0.0, 1.0)))
+        .collect();
     let mut cells: Vec<Vec<usize>> = vec![Vec::new(); keys.len()];
-    for (i, &(x, y)) in centers.iter().enumerate() {
-        cells[key_at(x / w, y / h)].push(i);
+    for (i, &(x, y)) in norm.iter().enumerate() {
+        cells[key_at(x, y)].push(i);
     }
+    relieve_crowding(&norm, &mut cells);
     for (k, cell) in cells.iter().enumerate() {
         let prefix = keys[k].to_string();
         match cell.as_slice() {
@@ -177,6 +250,27 @@ mod tests {
     fn one_key_per_element_where_the_window_is_sparse() {
         let ls = labels(&lattice(7, 3), W, H);
         assert!(ls.iter().all(|l| l.len() == 1));
+    }
+
+    #[test]
+    fn a_dense_strip_still_fits_in_two_keys() {
+        // A sidebar of eighty icons down the left edge covers three keys,
+        // which hold 26 each; the rest hop to the keys next to them rather
+        // than pushing every label to three characters.
+        let centers: Vec<(f64, f64)> = (0..80)
+            .map(|i| (20.0, (i as f64 + 0.5) * H / 80.0))
+            .collect();
+        let ls = labels(&centers, W, H);
+        assert!(
+            ls.iter().all(|l| l.len() <= 2),
+            "labels grew a third key: {ls:?}"
+        );
+        assert!(prefix_free(&ls));
+        // What moves, moves to a neighbour: nothing reaches the far side.
+        assert!(
+            ls.iter().all(|l| !"opl".contains(first(l))),
+            "the left edge reached the right of the keyboard: {ls:?}"
+        );
     }
 
     #[test]
