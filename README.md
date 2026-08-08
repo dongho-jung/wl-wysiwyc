@@ -14,14 +14,15 @@ cargo build --release
 ./target/release/wl-wysiwyc
 ```
 
-Keys: type a hint and the pointer goes to that target, then `-` clicks
-it and `=` right-clicks it; typing another hint moves the target
-instead. A hint's keys are where its target is: the keyboard is laid
-over the window, so something in the bottom-left corner is labelled `z`
-and something in the top-right `p`. `Space` switches between hints and
-the letter grid, `Tab` picks another window with `1`-`9`, `Backspace`
-undoes one press, and `Esc` backs out and then quits. Set `keys.reset`
-to the key that opens the overlay and pressing it again starts over.
+Keys: the overlay opens with the target on whatever the pointer is
+nearest, the arrow keys move it, and typing a hint sends it there. `-`
+clicks the target and `=` right-clicks it. A hint's keys are where its
+target is: the keyboard is laid over the window, so something in the
+bottom-left corner is labelled `z` and something in the top-right `p`.
+`Space` switches between hints and the letter grid, `Tab` picks another
+window with `1`-`9`, `Backspace` undoes one press, and `Esc` backs out
+and then quits. Set `keys.reset` to the key that opens the overlay and
+pressing it again starts over.
 `Ctrl+Esc` gets the keyboard back if a run is killed before it can tidy
 up.
 

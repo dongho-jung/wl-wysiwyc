@@ -46,6 +46,11 @@ pub enum Key {
     RightClick,
     /// Start the overlay's choices over, without giving up on it.
     Reset,
+    /// Move the target to the nearest one that way.
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 impl Key {
@@ -61,6 +66,10 @@ impl Key {
             Key::LeftClick => crate::config::get().keys.left(),
             Key::RightClick => crate::config::get().keys.right(),
             Key::Reset => crate::config::get().keys.reset().unwrap_or_default(),
+            Key::Left => "left".into(),
+            Key::Right => "right".into(),
+            Key::Up => "up".into(),
+            Key::Down => "down".into(),
         }
     }
 }
@@ -83,6 +92,10 @@ pub fn keys() -> Vec<Key> {
         Key::Tab,
         Key::LeftClick,
         Key::RightClick,
+        Key::Left,
+        Key::Right,
+        Key::Up,
+        Key::Down,
     ]);
     // The key that opens the overlay is usually this one, and while the
     // overlay is up the compositor gives it to the submap rather than to the
@@ -132,8 +145,11 @@ impl Shortcuts {
             registered,
             entered: false,
         };
-        let names: Vec<String> = keys().into_iter().map(Key::name).collect();
-        if let Err(e) = hypr::enter_submap(&names) {
+        let binds: Vec<(String, String)> = keys()
+            .into_iter()
+            .map(|k| (k.name(), k.name()))
+            .collect();
+        if let Err(e) = hypr::enter_submap(&binds) {
             eprintln!("shortcuts: {e}");
             return None;
         }

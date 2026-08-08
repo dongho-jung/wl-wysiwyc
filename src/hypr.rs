@@ -91,9 +91,13 @@ const APP: &str = "wl-wysiwyc";
 /// appends a second copy of every bind, and a key bound twice would take a
 /// hint the moment it is shown. Changing which keys the overlay wants
 /// therefore means a new submap rather than a redefinition of this one.
-fn submap_name(keys: &[String]) -> String {
+fn submap_name(keys: &[(String, String)]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in keys.join(" ").bytes() {
+    let joined: Vec<String> = keys
+        .iter()
+        .map(|(id, bind)| format!("{id}={bind}"))
+        .collect();
+    for byte in joined.join(" ").bytes() {
         h ^= byte as u64;
         h = h.wrapping_mul(0x100_0000_01b3);
     }
@@ -117,10 +121,10 @@ fn submap_defined(name: &str) -> bool {
 /// Define the submap that turns each key into a global shortcut. Hyprland
 /// takes config either as Lua or in its own language depending on how it was
 /// set up, and only one of the two answers to a given call, so try both.
-fn define_submap(name: &str, keys: &[String]) -> Result<(), Box<dyn Error>> {
+fn define_submap(name: &str, keys: &[(String, String)]) -> Result<(), Box<dyn Error>> {
     let mut lua_binds: String = keys
         .iter()
-        .map(|k| format!("hl.bind(\"{k}\", hl.dsp.global(\"{APP}:{k}\")) "))
+        .map(|(id, bind)| format!("hl.bind(\"{bind}\", hl.dsp.global(\"{APP}:{id}\")) "))
         .collect();
     // A way out that does not depend on this process being alive to answer.
     // Every other key in the submap dispatches to it, so if it wedges or is
@@ -132,8 +136,13 @@ fn define_submap(name: &str, keys: &[String]) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
     let mut batch = format!("keyword submap {name} ; ");
-    for k in keys {
-        batch.push_str(&format!("keyword bind ,{k},global,{APP}:{k} ; "));
+    for (id, bind) in keys {
+        // The legacy syntax wants the modifier in its own field.
+        let (mods, key) = match bind.split_once('+') {
+            Some((m, k)) => (m.trim().to_string(), k.trim().to_string()),
+            None => (String::new(), bind.clone()),
+        };
+        batch.push_str(&format!("keyword bind {mods},{key},global,{APP}:{id} ; "));
     }
     batch.push_str("keyword bind CTRL,escape,submap,reset ; ");
     batch.push_str("keyword submap reset");
@@ -143,7 +152,7 @@ fn define_submap(name: &str, keys: &[String]) -> Result<(), Box<dyn Error>> {
 
 /// Send the compositor into the overlay's submap, defining it first if this
 /// is the first run since Hyprland started.
-pub fn enter_submap(keys: &[String]) -> Result<(), Box<dyn Error>> {
+pub fn enter_submap(keys: &[(String, String)]) -> Result<(), Box<dyn Error>> {
     let name = submap_name(keys);
     if !submap_defined(&name) {
         define_submap(&name, keys)?;
@@ -191,6 +200,21 @@ fn dispatch_submap(name: &str) -> Result<(), Box<dyn Error>> {
         "ok" => Ok(()),
         other => Err(format!("hyprctl dispatch submap {name}: {other}").into()),
     }
+}
+
+/// Where the pointer is, in global logical coordinates. Wayland only tells a
+/// client about the pointer when it is over one of its surfaces, and this
+/// overlay deliberately takes no pointer input, so the compositor has to be
+/// asked directly.
+pub fn cursor_pos() -> Option<(f64, f64)> {
+    #[derive(Deserialize)]
+    struct Pos {
+        x: f64,
+        y: f64,
+    }
+    let raw = hyprctl_json("cursorpos").ok()?;
+    let pos: Pos = serde_json::from_slice(&raw).ok()?;
+    Some((pos.x, pos.y))
 }
 
 fn hyprctl_json(arg: &str) -> Result<Vec<u8>, Box<dyn Error>> {

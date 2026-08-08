@@ -109,6 +109,14 @@ nothing has been selected. An armed key is drawn pressed inside every
 label it would keep, a dark cap over that one character, and those
 labels turn green.
 
+The overlay opens with the target already on whatever the pointer is
+nearest, so a click can need no typing at all, and the arrow keys move
+it from there. A step goes to the nearest target roughly in line that
+way, and only widens its search when nothing is in line, which is what
+walks a row of buttons or a column of list items without surprises. The
+pointer travels to a new target over about a tenth of a second rather
+than jumping, since a pointer that jumps leaves you hunting for it.
+
 Esc unwinds one step at a time: the armed key, then the target, then
 what was typed, then the overlay. Backspace undoes one key press. Space
 swaps element hints for the letter grid. Tab opens the window picker.

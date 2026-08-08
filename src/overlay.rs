@@ -3,7 +3,7 @@ use crate::config;
 use crate::draw::{self, Canvas, Color, Rect};
 use crate::grid;
 use crate::hint;
-use crate::hypr::Snapshot;
+use crate::hypr::{self, Snapshot};
 use crate::shortcuts::{
     protocol::hyprland_global_shortcut_v1::{self, HyprlandGlobalShortcutV1},
     protocol::hyprland_global_shortcuts_manager_v1::HyprlandGlobalShortcutsManagerV1,
@@ -32,8 +32,10 @@ use smithay_client_toolkit::{
 };
 use std::collections::HashMap;
 use std::error::Error;
+use std::io::ErrorKind;
 use std::time::{Duration, Instant};
 use wayland_client::{
+    backend::WaylandError,
     globals::{registry_queue_init, GlobalListContents},
     protocol::{
         wl_keyboard, wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm, wl_surface,
@@ -94,6 +96,31 @@ enum Stage {
     PickWindow,
     PickTile { win: usize },
     PickHint { win: usize },
+}
+
+/// The pointer on its way to a target. Snapping it there would be quicker,
+/// but a pointer that jumps leaves you hunting for it; one that travels tells
+/// you where it went and roughly how far.
+struct Glide {
+    from: (f64, f64),
+    to: (f64, f64),
+    started: Instant,
+}
+
+impl Glide {
+    /// How long the trip takes. Long enough to follow, short enough not to
+    /// wait for.
+    const TIME: Duration = Duration::from_millis(110);
+
+    /// Where the pointer should be now, and whether it has arrived.
+    fn at(&self) -> ((f64, f64), bool) {
+        let t = (self.started.elapsed().as_secs_f64() / Self::TIME.as_secs_f64()).min(1.0);
+        // Ease out: quick off the mark, gentle into the target.
+        let e = 1.0 - (1.0 - t).powi(3);
+        let x = self.from.0 + (self.to.0 - self.from.0) * e;
+        let y = self.from.1 + (self.to.1 - self.from.1) * e;
+        ((x, y), t >= 1.0)
+    }
 }
 
 /// What a complete hint or tile picked out.
@@ -264,6 +291,11 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         mgr.create_virtual_pointer(seat.as_ref(), &qh, ())
     });
 
+    // Where the pointer is, so a target can be travelled to rather than
+    // jumped to.
+    let mut pointer_at = hypr::cursor_pos();
+    let mut glide: Option<Glide> = None;
+
     if let Some(smoke) = &smoke {
         let start = Instant::now();
         while start.elapsed() < smoke.duration {
@@ -283,14 +315,59 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             if !app.configured && start.elapsed() > Duration::from_secs(3) {
                 return Err("compositor never configured the overlay".into());
             }
-            queue.blocking_dispatch(&mut app)?;
+            // Wait on the compositor, or on the next step of a glide,
+            // whichever comes first.
+            queue.flush()?;
+            if let Some(guard) = queue.prepare_read() {
+                let wait = if glide.is_some() {
+                    Duration::from_millis(8)
+                } else {
+                    Duration::from_secs(1)
+                };
+                if readable(&conn, wait) {
+                    match guard.read() {
+                        // Woken with nothing to read: the wakeup was spurious,
+                        // or someone else drained the socket.
+                        Err(WaylandError::Io(e)) if e.kind() == ErrorKind::WouldBlock => {}
+                        other => {
+                            other?;
+                        }
+                    }
+                }
+            }
+            queue.dispatch_pending(&mut app)?;
             app.process_pending_pick();
             // A picked target wants the pointer on it. Doing that here rather
             // than where it was picked keeps the requests and their roundtrip
             // out of the middle of an event callback.
-            if let (Some(at), Some(vp)) = (app.aim.take(), pointer.as_ref()) {
+            if let Some(to) = app.aim.take() {
+                glide = match pointer_at {
+                    Some(from) => Some(Glide {
+                        from,
+                        to,
+                        started: Instant::now(),
+                    }),
+                    // Nowhere to travel from, so just be there.
+                    None => {
+                        pointer_at = Some(to);
+                        None
+                    }
+                };
+                if glide.is_none() {
+                    if let Some(vp) = pointer.as_ref() {
+                        let extent = app.snap.layout_extent;
+                        move_and_click(vp, to, extent, None, &mut queue, &mut app)?;
+                    }
+                }
+            }
+            if let (Some(g), Some(vp)) = (glide.as_ref(), pointer.as_ref()) {
+                let (at, done) = g.at();
                 let extent = app.snap.layout_extent;
                 move_and_click(vp, at, extent, None, &mut queue, &mut app)?;
+                pointer_at = Some(at);
+                if done {
+                    glide = None;
+                }
             }
             if !app.exit && app.configured && app.dirty {
                 app.draw();
@@ -316,6 +393,20 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         queue.roundtrip(&mut app)?;
     }
     Ok(app.target)
+}
+
+/// Wait for the compositor to have something to say, or for the timeout to
+/// run out, whichever happens first.
+fn readable(conn: &Connection, timeout: Duration) -> bool {
+    use std::os::fd::{AsFd, AsRawFd};
+    let mut poll = libc::pollfd {
+        fd: conn.as_fd().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    // SAFETY: one initialized pollfd, and a length that matches it.
+    unsafe { libc::poll(&mut poll, 1, ms) > 0 }
 }
 
 /// Debug helper: move the cursor through the virtual pointer, no click.
@@ -393,6 +484,10 @@ impl App {
             Key::LeftClick => return self.click_picked(BTN_LEFT),
             Key::RightClick => return self.click_picked(BTN_RIGHT),
             Key::Reset => return self.reset_input(),
+            Key::Left => return self.step(-1.0, 0.0),
+            Key::Right => return self.step(1.0, 0.0),
+            Key::Up => return self.step(0.0, -1.0),
+            Key::Down => return self.step(0.0, 1.0),
             Key::Char(ch) => ch.to_ascii_lowercase(),
         };
         if ch == ' ' {
@@ -454,8 +549,8 @@ impl App {
         }
     }
 
-    /// A hint or tile is complete. Either click it straight away, or put the
-    /// pointer on it and wait to be told which button, which is what makes
+    /// A hint or tile is complete. Either click it straight away, or take it
+    /// as the target and wait to be told which button, which is what makes
     /// the overlay usable for a hover or a right click as well as a click.
     fn pick(&mut self, what: Target, at: (f64, f64)) {
         if config::get().keys.instant {
@@ -464,6 +559,13 @@ impl App {
             self.exit = true;
             return;
         }
+        self.focus(what, at);
+    }
+
+    /// Take a target without clicking it, wherever it came from: a hint typed
+    /// out, an arrow key, or the pointer's own position when the overlay
+    /// opened.
+    fn focus(&mut self, what: Target, at: (f64, f64)) {
         // Typing is done with, so every hint comes back into view and another
         // one can be picked without backing out first.
         self.typed.clear();
@@ -474,6 +576,92 @@ impl App {
         // the way it would if the pointer had been dragged there.
         self.aim = Some(at);
         self.dirty = true;
+    }
+
+    /// Every target the current mode offers, with where clicking it would
+    /// land.
+    fn targets(&self) -> Vec<(Target, (f64, f64))> {
+        match self.stage {
+            Stage::PickHint { .. } => self
+                .hints
+                .iter()
+                .enumerate()
+                .map(|(i, h)| (Target::Hint(i), (h.cx, h.cy)))
+                .collect(),
+            Stage::PickTile { win } => {
+                let w = &self.snap.windows[win];
+                grid::tiles(w.w as f64, w.h as f64)
+                    .into_iter()
+                    .map(|t| {
+                        (
+                            Target::Tile(t.ch),
+                            (w.x as f64 + t.x + t.w / 2.0, w.y as f64 + t.y + t.h / 2.0),
+                        )
+                    })
+                    .collect()
+            }
+            Stage::PickWindow => Vec::new(),
+        }
+    }
+
+    /// Move the target one step in a direction.
+    ///
+    /// Anything roughly in line with the current target wins first, nearest
+    /// one taken, which is what walks a row of buttons or a column of list
+    /// items the way you would expect. Only when there is nothing in line does
+    /// the search widen to a cone, so leaving the end of a row still goes
+    /// somewhere sensible rather than nowhere.
+    fn step(&mut self, dx: f64, dy: f64) {
+        /// How far off the line a target can be and still count as in line,
+        /// in logical pixels: about a row of text.
+        const IN_LINE: f64 = 24.0;
+
+        let from = match self.picked {
+            Some((_, at)) => at,
+            None => match hypr::cursor_pos() {
+                Some(at) => at,
+                None => return,
+            },
+        };
+        let here = self.picked.map(|(p, _)| p);
+        let reach: Vec<(f64, f64, Target, (f64, f64))> = self
+            .targets()
+            .into_iter()
+            .filter(|&(what, _)| here != Some(what))
+            .filter_map(|(what, at)| {
+                let (ox, oy) = (at.0 - from.0, at.1 - from.1);
+                let along = ox * dx + oy * dy;
+                let across = (ox * dy - oy * dx).abs();
+                (along > 1.0 && across <= along).then_some((along, across, what, at))
+            })
+            .collect();
+        let best = reach
+            .iter()
+            .filter(|&&(_, across, _, _)| across <= IN_LINE)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .or_else(|| {
+                reach
+                    .iter()
+                    .min_by(|a, b| (a.0 + 3.0 * a.1).total_cmp(&(b.0 + 3.0 * b.1)))
+            });
+        if let Some(&(_, _, what, at)) = best {
+            self.focus(what, at);
+        }
+    }
+
+    /// Start on whatever the pointer is already nearest, so the arrow keys
+    /// have something to move from and a click needs no typing at all.
+    fn focus_nearest_cursor(&mut self) {
+        let Some(from) = hypr::cursor_pos() else {
+            return;
+        };
+        let nearest = self.targets().into_iter().min_by(|a, b| {
+            let d = |at: (f64, f64)| (at.0 - from.0).powi(2) + (at.1 - from.1).powi(2);
+            d(a.1).total_cmp(&d(b.1))
+        });
+        if let Some((what, at)) = nearest {
+            self.focus(what, at);
+        }
     }
 
     /// Click whatever was picked, and leave.
@@ -593,6 +781,7 @@ impl App {
         } else {
             self.enter_hint_stage(win);
         }
+        self.focus_nearest_cursor();
     }
 
     fn enter_hint_stage(&mut self, win: usize) {
