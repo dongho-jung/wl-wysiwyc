@@ -1,5 +1,5 @@
 use crate::atspi::{self, Element};
-use crate::draw::{self, Canvas, Color};
+use crate::draw::{self, Canvas, Color, Rect};
 use crate::grid;
 use crate::hint;
 use crate::hypr::Snapshot;
@@ -39,22 +39,32 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
 
 const BTN_LEFT: u32 = 0x110;
 
-const DIM: Color = Color::new(0.0, 0.0, 0.0, 0.22);
-const BOX_BG: Color = Color::new(0.08, 0.08, 0.10, 0.72);
-const BOX_BORDER: Color = Color::new(1.0, 1.0, 1.0, 0.85);
-const TEXT: Color = Color::new(1.0, 1.0, 1.0, 0.95);
-const TILE_BG: Color = Color::new(0.08, 0.08, 0.10, 0.28);
-const TILE_BORDER: Color = Color::new(1.0, 1.0, 1.0, 0.45);
-const HINT_BG: Color = Color::new(0.99, 0.76, 0.16, 0.96);
-const HINT_EDGE: Color = Color::new(0.35, 0.24, 0.02, 0.9);
-const HINT_TEXT: Color = Color::new(0.12, 0.08, 0.0, 1.0);
-const HINT_RING: Color = Color::new(1.0, 0.85, 0.3, 0.45);
-/// The armed target, one key press away from being clicked.
-const ARMED_BG: Color = Color::new(0.16, 0.83, 0.55, 0.98);
-const ARMED_EDGE: Color = Color::new(0.02, 0.25, 0.14, 0.95);
-const ARMED_TEXT: Color = Color::new(0.0, 0.12, 0.06, 1.0);
-const ARMED_RING: Color = Color::new(0.16, 0.90, 0.58, 0.95);
-const ARMED_FILL: Color = Color::new(0.16, 0.83, 0.55, 0.16);
+const DIM: Color = Color::new(0.0, 0.0, 0.0, 0.28);
+const SHADOW: Color = Color::new(0.0, 0.0, 0.0, 0.42);
+const BOX_BG: Color = Color::new(0.09, 0.09, 0.12, 0.86);
+const BOX_BORDER: Color = Color::new(1.0, 1.0, 1.0, 0.55);
+const TEXT: Color = Color::new(1.0, 1.0, 1.0, 0.96);
+const TILE_BG: Color = Color::new(0.08, 0.08, 0.10, 0.20);
+const TILE_BORDER: Color = Color::new(1.0, 1.0, 1.0, 0.30);
+const HINT_BG: Color = Color::new(0.98, 0.79, 0.29, 0.97);
+const HINT_EDGE: Color = Color::new(0.30, 0.20, 0.01, 0.35);
+const HINT_TEXT: Color = Color::new(0.14, 0.09, 0.0, 1.0);
+const HINT_RING: Color = Color::new(1.0, 0.85, 0.35, 0.5);
+/// The armed target, one key press away from being confirmed.
+const ARMED_BG: Color = Color::new(0.24, 0.85, 0.60, 0.98);
+const ARMED_EDGE: Color = Color::new(0.02, 0.26, 0.16, 0.55);
+const ARMED_TEXT: Color = Color::new(0.0, 0.14, 0.08, 1.0);
+const ARMED_RING: Color = Color::new(0.25, 0.92, 0.63, 0.95);
+const ARMED_GLOW: Color = Color::new(0.25, 0.92, 0.63, 0.5);
+const ARMED_FILL: Color = Color::new(0.24, 0.85, 0.60, 0.14);
+
+/// Label text size and the space around it, both in unscaled pixels.
+const LABEL_PX: f32 = 13.0;
+const LABEL_PAD_X: f32 = 5.0;
+const LABEL_PAD_Y: f32 = 4.0;
+/// Clearance between two labels, so a crowded window reads as separate
+/// labels rather than one block of colour.
+const LABEL_GAP: i32 = 3;
 
 /// What a smoke run should render. The window index is 1-based; None means
 /// the focused window, the same one the overlay starts on.
@@ -562,23 +572,32 @@ impl App {
 
 fn draw_pick_window(snap: &Snapshot, font: &Font, canvas: &mut Canvas, scale: i32) {
     let mon = &snap.monitor;
+    let s = scale as f32;
     for (i, w) in snap.windows.iter().enumerate() {
-        let rx = (w.x - mon.x) * scale;
-        let ry = (w.y - mon.y) * scale;
-        let rw = w.w * scale;
-        let rh = w.h * scale;
-        canvas.stroke_rect(rx, ry, rw, rh, 2 * scale, TILE_BORDER);
-        let side = ((w.w.min(w.h) as f64 * 0.30).clamp(56.0, 140.0) as i32) * scale;
-        let cx = rx + rw / 2;
-        let cy = ry + rh / 2;
-        canvas.fill_rect(cx - side / 2, cy - side / 2, side, side, BOX_BG);
-        canvas.stroke_rect(cx - side / 2, cy - side / 2, side, side, 2 * scale, BOX_BORDER);
+        let frame = Rect::new(
+            ((w.x - mon.x) * scale) as f32,
+            ((w.y - mon.y) * scale) as f32,
+            (w.w * scale) as f32,
+            (w.h * scale) as f32,
+        )
+        .grow(-s);
+        canvas.round_rect_outline(frame, 8.0 * s, 1.5 * s, TILE_BORDER);
+        let side = (w.w.min(w.h) as f32 * 0.30).clamp(56.0, 140.0) * s;
+        let card = Rect::new(
+            frame.x + (frame.w - side) / 2.0,
+            frame.y + (frame.h - side) / 2.0,
+            side,
+            side,
+        );
+        canvas.round_rect_shadow(card.shift(0.0, 2.0 * s), side * 0.24, 6.0 * s, SHADOW);
+        canvas.round_rect(card, side * 0.24, BOX_BG);
+        canvas.round_rect_outline(card, side * 0.24, 1.5 * s, BOX_BORDER);
         canvas.text_centered(
             font,
             &(i + 1).to_string(),
-            cx as f32,
-            cy as f32,
-            side as f32 * 0.55,
+            card.x + side / 2.0,
+            card.y + side / 2.0,
+            side * 0.55,
             TEXT,
         );
     }
@@ -598,30 +617,34 @@ fn draw_pick_tile(
     let ry = (w.y - mon.y) * scale;
     let rw = w.w * scale;
     let rh = w.h * scale;
+    let s = scale as f32;
     for t in grid::tiles(rw as f64, rh as f64) {
-        let tx = rx + t.x.round() as i32;
-        let ty = ry + t.y.round() as i32;
-        let tw = t.w.round() as i32;
-        let th = t.h.round() as i32;
         let hot = armed == Some(t.ch);
-        canvas.fill_rect(tx, ty, tw, th, if hot { ARMED_FILL } else { TILE_BG });
-        canvas.stroke_rect(
-            tx,
-            ty,
-            tw,
-            th,
-            if hot { 3 * scale } else { scale.max(1) },
+        let tile = Rect::new(
+            rx as f32 + t.x as f32,
+            ry as f32 + t.y as f32,
+            t.w as f32,
+            t.h as f32,
+        )
+        .grow(-1.5 * s);
+        let radius = 10.0 * s;
+        if hot {
+            canvas.round_rect_shadow(tile, radius, 10.0 * s, ARMED_GLOW);
+        }
+        canvas.round_rect(tile, radius, if hot { ARMED_FILL } else { TILE_BG });
+        canvas.round_rect_outline(
+            tile,
+            radius,
+            if hot { 2.5 * s } else { s },
             if hot { ARMED_RING } else { TILE_BORDER },
         );
-        let px = (t.w.min(t.h) as f32 * 0.42).min(64.0 * scale as f32);
-        canvas.text_centered(
-            font,
-            &t.ch.to_ascii_uppercase().to_string(),
-            tx as f32 + tw as f32 / 2.0,
-            ty as f32 + th as f32 / 2.0,
-            px,
-            if hot { ARMED_RING } else { TEXT },
-        );
+        let letter = t.ch.to_ascii_uppercase().to_string();
+        let px = (t.w.min(t.h) as f32 * 0.42).min(64.0 * s);
+        let (cx, cy) = (tile.x + tile.w / 2.0, tile.y + tile.h / 2.0);
+        // The letter sits over whatever the window is showing, so it carries
+        // its own shadow rather than trusting the background.
+        canvas.text_centered(font, &letter, cx + s, cy + s, px, SHADOW);
+        canvas.text_centered(font, &letter, cx, cy, px, TEXT);
     }
 }
 
@@ -634,59 +657,67 @@ struct LabelBox {
     h: i32,
 }
 
-fn overlaps(a: &LabelBox, b: &LabelBox) -> bool {
-    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+impl LabelBox {
+    fn rect(&self) -> Rect {
+        Rect::new(self.x as f32, self.y as f32, self.w as f32, self.h as f32)
+    }
+
+    /// Whether two labels are close enough to read as one blob.
+    fn crowds(&self, o: &LabelBox, gap: i32) -> bool {
+        self.x - gap < o.x + o.w
+            && o.x - gap < self.x + self.w
+            && self.y - gap < o.y + o.h
+            && o.y - gap < self.y + self.h
+    }
 }
 
 /// Lay out one box per hint. Labels want the top-left corner of their
 /// element, vimium style, but a dense tree stacks them on top of each other,
-/// so a box that would land on an earlier one tries the element's other
-/// corners and sides first. Placement covers every hint, not just the
-/// visible ones, so labels stay put while a prefix is typed.
+/// so a box that would land on an earlier one, or right up against it, tries
+/// the element's other corners and sides first. Placement covers every hint,
+/// not just the visible ones, so labels stay put while a prefix is typed.
 fn place_labels(
     hints: &[Hint],
     font: &Font,
-    px: f32,
-    pad: i32,
     mon: (i32, i32),
     canvas: (i32, i32),
     scale: i32,
 ) -> Vec<LabelBox> {
+    let px = LABEL_PX * scale as f32;
+    let pad_x = (LABEL_PAD_X * scale as f32) as i32;
+    let pad_y = (LABEL_PAD_Y * scale as f32) as i32;
+    let gap = LABEL_GAP * scale;
     let mut taken: Vec<LabelBox> = Vec::with_capacity(hints.len());
     for h in hints {
         let ex = ((h.rx - mon.0 as f64) * scale as f64) as i32;
         let ey = ((h.ry - mon.1 as f64) * scale as f64) as i32;
         let ew = (h.rw * scale as f64) as i32;
         let eh = (h.rh * scale as f64) as i32;
-        let w = draw::text_width(font, &h.label.to_ascii_uppercase(), px) as i32 + 2 * pad;
-        let h_ = px as i32 + 2 * pad;
+        let bh = px as i32 + 2 * pad_y;
+        // A one-key label keeps its box square rather than turning into a
+        // sliver.
+        let bw =
+            (draw::text_width(font, &h.label.to_ascii_uppercase(), px) as i32 + 2 * pad_x).max(bh);
         let spots = [
-            (ex, ey - h_ / 2),
-            (ex + ew - w, ey - h_ / 2),
-            (ex, ey + eh - h_ / 2),
-            (ex + ew - w, ey + eh - h_ / 2),
-            (ex - w, ey + (eh - h_) / 2),
-            (ex + ew, ey + (eh - h_) / 2),
+            (ex, ey - bh / 2),
+            (ex + ew - bw, ey - bh / 2),
+            (ex, ey + eh - bh / 2),
+            (ex + ew - bw, ey + eh - bh / 2),
+            (ex - bw, ey + (eh - bh) / 2),
+            (ex + ew, ey + (eh - bh) / 2),
         ];
-        let mut chosen = None;
-        for (x, y) in spots {
-            let b = LabelBox {
-                x: x.clamp(0, (canvas.0 - w).max(0)),
-                y: y.clamp(0, (canvas.1 - h_).max(0)),
-                w,
-                h: h_,
-            };
-            if !taken.iter().any(|t| overlaps(t, &b)) {
-                chosen = Some(b);
-                break;
-            }
-        }
-        taken.push(chosen.unwrap_or(LabelBox {
-            x: spots[0].0.clamp(0, (canvas.0 - w).max(0)),
-            y: spots[0].1.clamp(0, (canvas.1 - h_).max(0)),
-            w,
-            h: h_,
-        }));
+        let fit = |(x, y): (i32, i32)| LabelBox {
+            x: x.clamp(0, (canvas.0 - bw).max(0)),
+            y: y.clamp(0, (canvas.1 - bh).max(0)),
+            w: bw,
+            h: bh,
+        };
+        let chosen = spots
+            .into_iter()
+            .map(fit)
+            .find(|b| !taken.iter().any(|t| t.crowds(b, gap)))
+            .unwrap_or_else(|| fit(spots[0]));
+        taken.push(chosen);
     }
     taken
 }
@@ -714,27 +745,33 @@ fn draw_pick_hint(
     } = view;
     // What the armed key would leave behind, which is what it previews.
     let preview = armed.map(|ch| format!("{typed}{ch}"));
+    // One candidate left means confirming that key clicks, so it is worth
+    // more than the green a narrowing press gets.
+    let clinches = preview.as_deref().is_some_and(|p| {
+        hints
+            .iter()
+            .filter(|h| h.label.starts_with(p))
+            .take(2)
+            .count()
+            == 1
+    });
     let mon = &snap.monitor;
     let w = &snap.windows[win];
-    canvas.stroke_rect(
-        (w.x - mon.x) * scale,
-        (w.y - mon.y) * scale,
-        w.w * scale,
-        w.h * scale,
-        2 * scale,
+    let s = scale as f32;
+    let px = LABEL_PX * s;
+    canvas.round_rect_outline(
+        Rect::new(
+            ((w.x - mon.x) * scale) as f32,
+            ((w.y - mon.y) * scale) as f32,
+            (w.w * scale) as f32,
+            (w.h * scale) as f32,
+        )
+        .grow(-s),
+        8.0 * s,
+        1.5 * s,
         TILE_BORDER,
     );
-    let px = 14.0 * scale as f32;
-    let pad = 3 * scale;
-    let boxes = place_labels(
-        hints,
-        font,
-        px,
-        pad,
-        (mon.x, mon.y),
-        (canvas.w, canvas.h),
-        scale,
-    );
+    let boxes = place_labels(hints, font, (mon.x, mon.y), (canvas.w, canvas.h), scale);
     for (h, b) in hints.iter().zip(&boxes) {
         if !h.label.starts_with(typed) {
             continue;
@@ -742,7 +779,8 @@ fn draw_pick_hint(
         let hot = preview.as_deref().is_some_and(|p| h.label.starts_with(p));
         // While a key is armed, what it rules out steps back rather than
         // competing with what it keeps.
-        let fade = if preview.is_some() && !hot { 0.35 } else { 1.0 };
+        let dulled = preview.is_some() && !hot;
+        let fade = if dulled { 0.26 } else { 1.0 };
         let (ring, bg, edge, text) = if hot {
             (ARMED_RING, ARMED_BG, ARMED_EDGE, ARMED_TEXT)
         } else {
@@ -756,26 +794,34 @@ fn draw_pick_hint(
         // Outlining every element at once is noise; the outline only earns
         // its place once a key has narrowed the field.
         if hot || !typed.is_empty() {
-            canvas.stroke_rect(
-                ((h.rx - mon.x as f64) * scale as f64) as i32,
-                ((h.ry - mon.y as f64) * scale as f64) as i32,
-                (h.rw * scale as f64) as i32,
-                (h.rh * scale as f64) as i32,
-                if hot { 2 * scale } else { scale.max(1) },
-                ring,
+            let el = Rect::new(
+                ((h.rx - mon.x as f64) * scale as f64) as f32,
+                ((h.ry - mon.y as f64) * scale as f64) as f32,
+                (h.rw * scale as f64) as f32,
+                (h.rh * scale as f64) as f32,
             );
+            if hot && clinches {
+                canvas.round_rect_shadow(el, 4.0 * s, 6.0 * s, ARMED_GLOW.fade(0.45));
+            }
+            canvas.round_rect_outline(el, 4.0 * s, if hot && clinches { 2.0 * s } else { s }, ring);
         }
-        let rem = h.label[typed.len()..].to_ascii_uppercase();
-        canvas.fill_rect(b.x, b.y, b.w, b.h, bg);
-        canvas.stroke_rect(b.x, b.y, b.w, b.h, scale.max(1), edge);
-        canvas.text_centered(
-            font,
-            &rem,
-            b.x as f32 + b.w as f32 / 2.0,
-            b.y as f32 + b.h as f32 / 2.0,
-            px,
-            text,
-        );
+        let label = h.label.to_ascii_uppercase();
+        let (cx, cy) = (b.x as f32 + b.w as f32 / 2.0, b.y as f32 + b.h as f32 / 2.0);
+        let radius = b.h as f32 * 0.3;
+        if hot && clinches {
+            canvas.round_rect_shadow(b.rect(), radius, 7.0 * s, ARMED_GLOW);
+        } else if !dulled {
+            canvas.round_rect_shadow(b.rect().shift(0.0, 1.2 * s), radius, 3.5 * s, SHADOW);
+        }
+        canvas.round_rect(b.rect(), radius, bg);
+        canvas.round_rect_outline(b.rect(), radius, s, edge);
+        // The keys already confirmed stay in place and step back, so the
+        // label keeps its size and shows how far along it is.
+        let (done, rest) = label.split_at(typed.len());
+        let pen = cx - draw::text_width(font, &label, px) / 2.0;
+        let base = draw::baseline(font, cy, px);
+        let pen = canvas.text_run(font, done, pen, base, px, text.fade(0.3));
+        canvas.text_run(font, rest, pen, base, px, text);
     }
 }
 

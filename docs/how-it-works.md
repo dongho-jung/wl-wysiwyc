@@ -22,11 +22,13 @@ and the bounding box of the whole output layout.
 and creates one wlr-layer-shell surface on the overlay layer, anchored
 to all edges of the focused output, with exclusive keyboard
 interactivity. Rendering is plain software drawing into a shared-memory
-Argb8888 buffer (`src/draw.rs`): premultiplied alpha, rectangles, and
-glyphs rasterized with fontdue. The font comes from `fc-match
-sans:bold` with fallbacks to common system paths. Buffers are rendered
-at an integer scale of ceil(monitor scale) so text stays sharp on
-fractional-scale outputs.
+Argb8888 buffer (`src/draw.rs`): premultiplied alpha and glyphs
+rasterized with fontdue. Every shape is a rounded rectangle measured by
+its signed distance, which is what gives the labels smooth corners,
+outlines of any width, and shadows, all from the same few lines. The
+font comes from `fc-match sans:bold` with fallbacks to common system
+paths. Buffers are rendered at an integer scale of ceil(monitor scale)
+so text stays sharp on fractional-scale outputs.
 
 Startup queries the focused window's clickable elements over AT-SPI
 (1.8 s hard timeout, results cached per window). If elements are found
@@ -41,6 +43,12 @@ whatever that key would select turns green and the rest steps back.
 Pressing the same key again, or Enter, confirms it, and confirming the
 last key of a hint clicks that element. Another key moves the preview,
 Backspace undoes one press, and a key that leads nowhere is ignored.
+
+An armed key that leaves a single candidate is the press that clicks,
+so it earns a ring and a glow around the element while a press that
+only narrows the field does not. Confirmed keys stay in their label and
+dim in place, which keeps a label the same size from first press to
+last and shows how far along it is.
 
 So a hint of DJ is d, d, j, j: two keys, each confirmed separately.
 This holds in both modes, and it is what makes the overlay usable
@@ -65,12 +73,12 @@ each other. Labels are prefix-free, so a complete label is never the
 start of another one.
 
 Each confirmed key narrows the visible hints. Labels sit at the
-top-left corner of their element,
-vimium style, but a label that would land on one already placed tries
-the element's other corners and sides first. Element outlines are drawn
-only once a key has narrowed the field, since outlining everything at
-once is noise. Esc drops the armed key, then the confirmed ones, then
-quits. Space switches to the grid for spots the tree does not cover.
+top-left corner of their element, vimium style, but a label that would
+land on one already placed, or right up against it, tries the element's
+other corners and sides first. Element outlines are drawn only once a
+key has narrowed the field, since outlining everything at once is
+noise. Esc drops the armed key, then the confirmed ones, then quits.
+Space switches to the grid for spots the tree does not cover.
 
 ### Grid mode
 
