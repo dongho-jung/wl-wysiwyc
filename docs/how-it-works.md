@@ -44,19 +44,19 @@ Pressing the same key again, or Enter, confirms it, and confirming the
 last key of a hint clicks that element. Another key moves the preview,
 Backspace undoes one press, and a key that leads nowhere is ignored.
 
-Three things say a key is waiting rather than spent. A strip along the
-bottom of the window names the keys confirmed so far, the key waiting
-on a second press, and what that press will do: "press again to click"
-once one candidate is left, "press again to confirm" while several
-remain. The armed key is drawn pressed inside every label it keeps, as
-a dark cap over that character. And an armed key that leaves a single
-candidate earns a ring and a glow around the element, which a press
-that only narrows the field does not get.
+An armed key is drawn pressed inside every label it would keep, a dark
+cap over that one character, and those labels turn green. One that
+leaves a single candidate also earns a ring and a glow around the
+element, which a press that only narrows the field does not get.
 
-Confirmed keys stay in their label and dim in place, which keeps a
-label the same size from first press to last and shows how far along it
-is. What an armed key rules out fades well back and is drawn first, so
-nothing can end up on top of a candidate.
+What an armed key would rule out is left alone. Nothing is confirmed
+yet, so dimming those labels would answer a question the press has only
+asked; they keep their colour and the candidates are drawn last so
+nothing covers them. Confirmed keys, on the other hand, do step back:
+they stay in their label and dim in place, which keeps a label the same
+size from first press to last and shows how far along it is. A label's
+characters are spaced apart so the cap never runs into the character
+beside it.
 
 So a hint of DJ is d, d, j, j: two keys, each confirmed separately.
 This holds in both modes, and it is what makes the overlay usable
