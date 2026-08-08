@@ -214,6 +214,11 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
     queue.roundtrip(&mut app)?;
     let output = app.find_output();
 
+    // Read the window before taking any keys. The read can take a second on
+    // a heavy page, and it is better spent while the keyboard still belongs
+    // to the user than inside a submap that cannot answer yet.
+    app.process_pending_pick();
+
     let surface = compositor.create_surface(&qh);
     // Take no pointer input at all. A surface that accepts it pulls the
     // pointer off whatever is underneath, and the window sees the pointer
@@ -260,7 +265,14 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             std::thread::sleep(Duration::from_millis(30));
         }
     } else {
+        let start = Instant::now();
         while !app.exit {
+            // A surface that never gets configured means something else owns
+            // the screen. Give up rather than sit in the submap holding the
+            // keyboard hostage for a window that will not appear.
+            if !app.configured && start.elapsed() > Duration::from_secs(3) {
+                return Err("compositor never configured the overlay".into());
+            }
             // Wait for either the compositor or the armed key's own clock,
             // whichever comes first.
             queue.flush()?;

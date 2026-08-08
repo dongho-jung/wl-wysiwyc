@@ -31,6 +31,8 @@ Usage:
                              KEYS is a run of presses: all but the last
                              confirmed, the last one armed, or all of them
                              with a trailing dot (debugging aid)
+  wl-wysiwyc --reset         leave the key submap, for when a run was killed
+                             before it could (Ctrl+Esc does the same)
   wl-wysiwyc --move-test X Y move the cursor to global (X, Y) through the
                              virtual pointer, no click (debugging aid)
   wl-wysiwyc --help          show this help
@@ -76,6 +78,11 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("--render") => {
             let path = args.get(1).ok_or("--render needs a file to write")?;
             render(path, opt_window(2)?, args.get(3).map_or("", String::as_str))
+        }
+        Some("--reset") => {
+            hypr::leave_submap()?;
+            println!("left the wl-wysiwyc submap");
+            Ok(())
         }
         Some("--move-test") => {
             let x: f64 = args.get(1).ok_or("--move-test needs X and Y")?.parse()?;

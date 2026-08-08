@@ -84,6 +84,8 @@ pub struct Snapshot {
 /// The submap the overlay's keys live in, named after the app so the
 /// shortcut ids and the submap read the same in `hyprctl binds`.
 const SUBMAP: &str = "wl-wysiwyc";
+/// The key that leaves the submap without asking this process anything.
+const RESCUE: &str = "CTRL + escape";
 
 fn hyprctl(args: &[&str]) -> Result<String, Box<dyn Error>> {
     let out = Command::new("hyprctl").args(args).output()?;
@@ -105,10 +107,15 @@ fn submap_defined() -> bool {
 /// takes config either as Lua or in its own language depending on how it was
 /// set up, and only one of the two answers to a given call, so try both.
 fn define_submap(keys: &[String]) -> Result<(), Box<dyn Error>> {
-    let lua_binds: String = keys
+    let mut lua_binds: String = keys
         .iter()
         .map(|k| format!("hl.bind(\"{k}\", hl.dsp.global(\"{SUBMAP}:{k}\")) "))
         .collect();
+    // A way out that does not depend on this process being alive to answer.
+    // Every other key in the submap dispatches to it, so if it wedges or is
+    // killed between the submap going up and coming down, this is the only
+    // key that still does anything.
+    lua_binds.push_str(&format!("hl.bind(\"{RESCUE}\", hl.dsp.submap(\"reset\")) "));
     let lua = format!("hl.define_submap(\"{SUBMAP}\", function() {lua_binds}end)");
     if hyprctl(&["eval", &lua]).is_ok_and(|r| r == "ok") {
         return Ok(());
@@ -117,6 +124,7 @@ fn define_submap(keys: &[String]) -> Result<(), Box<dyn Error>> {
     for k in keys {
         batch.push_str(&format!("keyword bind ,{k},global,{SUBMAP}:{k} ; "));
     }
+    batch.push_str("keyword bind CTRL,escape,submap,reset ; ");
     batch.push_str("keyword submap reset");
     hyprctl(&["--batch", &batch])?;
     Ok(())
@@ -148,8 +156,8 @@ fn watch_for_death() {
          hyprctl dispatch 'hl.dsp.submap(\"reset\")' >/dev/null 2>&1 || \
          hyprctl dispatch submap reset >/dev/null 2>&1"
     );
-    if let Err(e) = Command::new("sh")
-        .args(["-c", &script])
+    if let Err(e) = Command::new("setsid")
+        .args(["-f", "sh", "-c", &script])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()

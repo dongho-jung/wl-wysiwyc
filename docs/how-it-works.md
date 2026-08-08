@@ -56,14 +56,24 @@ enters it. Triggering a shortcut delivers an event without touching
 focus, so the window under the overlay stays exactly as it was, pointer
 and activation and hover included.
 
-The submap is defined once per Hyprland session: defining it twice
-binds every key twice, and a key bound twice would arm and confirm in
-one press. It is left on the way out, and a watchdog process resets it
-if this one is killed rather than asked to quit, since a killed process
-runs no destructors and every key in the submap points at a client that
-is gone. Hyprland takes its config either as Lua or in its own
-language, and only one of the two answers a given call, so both forms
-are tried.
+The submap is defined once per Hyprland session: defining it twice binds
+every key twice, and a key bound twice would arm and confirm in one
+press. Hyprland takes its config either as Lua or in its own language,
+and only one of the two answers a given call, so both forms are tried.
+
+Getting out of the submap has three guards, because every key in it
+dispatches to this client and being stuck there with the client gone
+would leave the keyboard useless. The overlay leaves on the way out. A
+watchdog process, detached from this one's process group, leaves on its
+behalf if it is killed rather than asked to quit, since a killed process
+runs no destructors. And the submap binds `Ctrl+Esc` straight to leaving
+it, which works whatever state this process is in, as does
+`wl-wysiwyc --reset` from a terminal.
+
+The window's elements are read before the submap goes up rather than
+after, so the keyboard is only taken once the overlay can answer for it.
+For the same reason the overlay gives up if the compositor has not
+configured its surface within three seconds.
 
 A compositor without the protocol, or a submap that will not take,
 falls back to holding the keyboard the ordinary way, hover cost and
