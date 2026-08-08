@@ -1261,7 +1261,8 @@ fn draw_pick_hint(
             }
             canvas.round_rect(r, radius, bg);
             canvas.round_rect_outline(r, radius, s, edge);
-            draw_label_text(canvas, font, r, &h.label, typed.len(), hot, px, text, s);
+            let cap = hot && armed.is_some();
+            draw_label_text(canvas, font, r, &h.label, typed.len(), cap, px, text, s);
         }
     }
 }
@@ -1273,7 +1274,7 @@ fn label_width(font: &Font, label: &str, px: f32, s: f32) -> f32 {
 }
 
 /// The label's own text, character by character: keys already confirmed step
-/// back, the armed key wears a pressed cap, and what is still to come stays
+/// back, an armed key wears a pressed cap, and what is still to come stays
 /// plain.
 #[allow(clippy::too_many_arguments)]
 fn draw_label_text(
@@ -1282,7 +1283,7 @@ fn draw_label_text(
     r: Rect,
     label: &str,
     done: usize,
-    hot: bool,
+    cap: bool,
     px: f32,
     text: Color,
     s: f32,
@@ -1294,10 +1295,10 @@ fn draw_label_text(
     for (i, ch) in label.chars().enumerate() {
         let glyph = ch.to_string();
         let w = draw::text_width(font, &glyph, px);
-        // The armed key is the first one not yet confirmed. Showing it
-        // pressed, rather than only tinting the whole label, is what says a
-        // key is waiting on a second press.
-        let armed = hot && i == done;
+        // Only a key actually waiting on a second press wears the cap. A
+        // label the pointer has already been sent to is not waiting on
+        // anything, so capping its first character would say otherwise.
+        let armed = cap && i == done;
         if armed {
             let cap = Rect::new(pen - track / 2.0, r.y + 2.5 * s, w + track, r.h - 5.0 * s);
             canvas.round_rect(cap, cap.h * 0.32, *config::get().colors.armed_key);
