@@ -16,7 +16,8 @@ cargo build --release
 
 Keys: the overlay opens with the target on whatever the pointer is
 nearest, the arrow keys move it, and typing a hint sends it there. `-`
-clicks the target and `=` right-clicks it. A hint's keys are where its
+clicks the target, `=` right-clicks it, and `Shift`+`-` double-clicks
+it. A hint's keys are where its
 target is: the keyboard is laid over the window, so something in the
 bottom-left corner is labelled `z` and something in the top-right `p`.
 `Space` switches between hints and the letter grid, `Tab` picks another

@@ -159,14 +159,19 @@ struct App {
     dirty: bool,
     stage: Stage,
     exit: bool,
-    /// Where to click on the way out, and with which button.
+    /// Where to click on the way out, with which button, and how many times.
     target: Option<(f64, f64)>,
     button: u32,
+    clicks: u32,
     /// Where to send the pointer, once the loop can get to it.
     aim: Option<(f64, f64)>,
     hints: Vec<Hint>,
     /// Keys already confirmed, narrowing the hints.
     typed: String,
+    /// Whether shift is held, which turns the left click key into a double
+    /// click. Only the fallback path needs this; a global shortcut arrives
+    /// already told apart by the compositor.
+    shift: bool,
     /// With `keys.confirm` on, a key pressed once and not taken yet: it shows
     /// what it would select, and pressing it again takes it.
     armed: Option<char>,
@@ -231,9 +236,11 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         exit: false,
         target: None,
         button: BTN_LEFT,
+        clicks: 1,
         aim: None,
         hints: Vec::new(),
         typed: String::new(),
+        shift: false,
         armed: None,
         picked: None,
         elements_cache: HashMap::new(),
@@ -387,8 +394,8 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             .as_ref()
             .ok_or("compositor does not expose zwlr_virtual_pointer_manager_v1")?;
         let extent = app.snap.layout_extent;
-        let button = app.button;
-        move_and_click(vp, target, extent, Some(button), &mut queue, &mut app)?;
+        let click = (app.button, app.clicks);
+        move_and_click(vp, target, extent, Some(click), &mut queue, &mut app)?;
         vp.destroy();
         queue.roundtrip(&mut app)?;
     }
@@ -444,7 +451,7 @@ fn move_and_click<S>(
     vp: &ZwlrVirtualPointerV1,
     (gx, gy): (f64, f64),
     (ext_w, ext_h): (i32, i32),
-    button: Option<u32>,
+    click: Option<(u32, u32)>,
     queue: &mut wayland_client::EventQueue<S>,
     state: &mut S,
 ) -> Result<(), Box<dyn Error>> {
@@ -453,13 +460,17 @@ fn move_and_click<S>(
     vp.motion_absolute(0, x, y, ext_w as u32, ext_h as u32);
     vp.frame();
     queue.roundtrip(state)?;
-    if let Some(button) = button {
-        std::thread::sleep(Duration::from_millis(20));
-        vp.button(0, button, wl_pointer::ButtonState::Pressed);
-        vp.frame();
-        vp.button(0, button, wl_pointer::ButtonState::Released);
-        vp.frame();
-        queue.roundtrip(state)?;
+    if let Some((button, times)) = click {
+        for n in 0..times.max(1) {
+            // A pause the toolkit underneath can tell apart: too quick and
+            // the two presses of a double click arrive as one.
+            std::thread::sleep(Duration::from_millis(if n == 0 { 20 } else { 40 }));
+            vp.button(0, button, wl_pointer::ButtonState::Pressed);
+            vp.frame();
+            vp.button(0, button, wl_pointer::ButtonState::Released);
+            vp.frame();
+            queue.roundtrip(state)?;
+        }
     }
     Ok(())
 }
@@ -481,8 +492,9 @@ impl App {
             Key::Escape => return self.cancel(),
             Key::Backspace => return self.undo(),
             Key::Tab => return self.pick_window(),
-            Key::LeftClick => return self.click_picked(BTN_LEFT),
-            Key::RightClick => return self.click_picked(BTN_RIGHT),
+            Key::LeftClick => return self.click_picked(BTN_LEFT, 1),
+            Key::RightClick => return self.click_picked(BTN_RIGHT, 1),
+            Key::DoubleClick => return self.click_picked(BTN_LEFT, 2),
             Key::Reset => return self.reset_input(),
             Key::Left => return self.step(-1.0, 0.0),
             Key::Right => return self.step(1.0, 0.0),
@@ -665,12 +677,13 @@ impl App {
     }
 
     /// Click whatever was picked, and leave.
-    fn click_picked(&mut self, button: u32) {
+    fn click_picked(&mut self, button: u32, clicks: u32) {
         let Some((_, at)) = self.picked else {
             return;
         };
         self.target = Some(at);
         self.button = button;
+        self.clicks = clicks;
         self.exit = true;
     }
 
@@ -1505,6 +1518,10 @@ impl KeyboardHandler for App {
         event: KeyEvent,
     ) {
         if let Some(key) = key_of(&event) {
+            let key = match (key, self.shift) {
+                (Key::LeftClick, true) => Key::DoubleClick,
+                (key, _) => key,
+            };
             self.press(key);
         }
     }
@@ -1523,9 +1540,10 @@ impl KeyboardHandler for App {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: u32,
-        _: Modifiers,
+        modifiers: Modifiers,
         _: u32,
     ) {
+        self.shift = modifiers.shift;
     }
 }
 

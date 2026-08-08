@@ -51,9 +51,21 @@ pub enum Key {
     Right,
     Up,
     Down,
+    /// Shift and the left click key together: click twice.
+    DoubleClick,
 }
 
 impl Key {
+    /// The keys the submap presses this shortcut with. Usually the key's own
+    /// name; a double click is the left click key with shift held, which is
+    /// why the binding and the name are not always the same string.
+    pub fn binding(self) -> String {
+        match self {
+            Key::DoubleClick => format!("SHIFT + {}", crate::config::get().keys.left()),
+            other => other.name(),
+        }
+    }
+
     /// The shortcut id, which is also the xkb key name the submap binds. The
     /// click keys are whatever the config says they are.
     pub fn name(self) -> String {
@@ -70,6 +82,7 @@ impl Key {
             Key::Right => "right".into(),
             Key::Up => "up".into(),
             Key::Down => "down".into(),
+            Key::DoubleClick => "double".into(),
         }
     }
 }
@@ -96,6 +109,7 @@ pub fn keys() -> Vec<Key> {
         Key::Right,
         Key::Up,
         Key::Down,
+        Key::DoubleClick,
     ]);
     // The key that opens the overlay is usually this one, and while the
     // overlay is up the compositor gives it to the submap rather than to the
@@ -147,7 +161,7 @@ impl Shortcuts {
         };
         let binds: Vec<(String, String)> = keys()
             .into_iter()
-            .map(|k| (k.name(), k.name()))
+            .map(|k| (k.name(), k.binding()))
             .collect();
         if let Err(e) = hypr::enter_submap(&binds) {
             eprintln!("shortcuts: {e}");
