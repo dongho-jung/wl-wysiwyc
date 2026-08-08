@@ -272,16 +272,32 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
             continue;
         }
 
+        // A node's own rectangle, once Chromium's pixel ratio is divided out.
+        let rect = extents_of(&conn, &node_dest, &path).map(|(x, y, w, h)| {
+            (
+                x as f64 / ratio,
+                y as f64 / ratio,
+                w as f64 / ratio,
+                h as f64 / ratio,
+            )
+        });
+        let on_screen = |(ex, ey, ew, eh): (f64, f64, f64, f64)| {
+            ex + ew > 0.0 && ey + eh > 0.0 && ex < frame_w && ey < frame_h
+        };
+
+        // A container scrolled off the window cannot have anything visible
+        // inside it, and a long page has far more of those than it has
+        // visible ones. Walking them anyway is what spends the budget before
+        // the walk reaches the part of the page you are looking at.
+        if let Some(r) = rect {
+            if r.2 > 0.0 && r.3 > 0.0 && !on_screen(r) {
+                continue;
+            }
+        }
+
         if CLICKABLE_ROLES.contains(&role) && st & (1 << STATE_SENSITIVE) != 0 {
-            if let Some((x, y, w, h)) = extents_of(&conn, &node_dest, &path) {
-                let (ex, ey, ew, eh) = (
-                    x as f64 / ratio,
-                    y as f64 / ratio,
-                    w as f64 / ratio,
-                    h as f64 / ratio,
-                );
-                let on_screen = ex + ew > 0.0 && ey + eh > 0.0 && ex < frame_w && ey < frame_h;
-                if ew >= 3.0 && eh >= 3.0 && on_screen {
+            if let Some((ex, ey, ew, eh)) = rect {
+                if ew >= 3.0 && eh >= 3.0 && on_screen((ex, ey, ew, eh)) {
                     let key = (ex as i32, ey as i32, ew as i32, eh as i32, role);
                     if seen_rects.insert(key) {
                         out.push(Element {
@@ -298,6 +314,8 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
 
         let mut child_ratio = ratio;
         if role == ROLE_DOCUMENT_WEB {
+            // The ratio has to come from the raw extents, since dividing by
+            // the current ratio is the very thing being corrected.
             if let (Some(parent), Some((_, _, dw, _))) =
                 (parent_path.as_deref(), extents_of(&conn, &node_dest, &path))
             {

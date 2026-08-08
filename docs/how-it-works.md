@@ -176,11 +176,17 @@ when elements exist.
    Budgets: 4000 nodes, 400 elements, 1.2 s. Running out of budget is
    reported on stderr, because the walk is breadth-first and a heavy
    page then keeps its chrome and loses part of its content.
-5. Pruning: trees nest a link inside a list row inside a cell, all with
+5. Viewport: a node whose rectangle sits wholly outside the window is
+   skipped along with everything inside it. A long page has far more of
+   those than it has visible ones, and walking them is what spends the
+   budget before the walk reaches the part of the page on screen. The
+   cost is a child pinned on screen inside a container scrolled off it,
+   rare enough to trade for a walk three times as fast.
+6. Pruning: trees nest a link inside a list row inside a cell, all with
    near-identical extents, and one hint per level buries the window in
    labels. A row or tree item that wraps another clickable element
    gives way to it, and what is left keeps one element per spot.
-6. Coordinate correction: toolkits report window-relative coordinates
+7. Coordinate correction: toolkits report window-relative coordinates
    under Wayland (they do not know their global position), so the
    window's global position from Hyprland is added afterwards. Chromium
    additionally reports web-content extents in physical pixels while
