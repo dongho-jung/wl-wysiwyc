@@ -1,6 +1,28 @@
-use fontdue::Font;
+use fontdue::{Font, Metrics};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::error::Error;
 use std::process::Command;
+
+/// A glyph at one size: what fontdue hands back, kept for next time.
+type Raster = (Metrics, Vec<u8>);
+
+thread_local! {
+    /// Rasterized glyphs, kept between frames. fontdue rasterizes on every
+    /// call, and a frame is a few hundred glyphs; doing that again for each
+    /// frame of a pointer's travel is most of what a frame costs.
+    static GLYPHS: RefCell<HashMap<(char, u32), Raster>> = RefCell::new(HashMap::new());
+}
+
+/// Look at a glyph's raster, drawing it once and keeping it.
+fn with_glyph<T>(font: &Font, ch: char, px: f32, f: impl FnOnce(&Metrics, &[u8]) -> T) -> T {
+    let key = (ch, (px * 64.0) as u32);
+    GLYPHS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let entry = cache.entry(key).or_insert_with(|| font.rasterize(ch, px));
+        f(&entry.0, &entry.1)
+    })
+}
 
 #[derive(Clone, Copy)]
 pub struct Color {
@@ -86,32 +108,46 @@ impl Canvas<'_> {
             (c.r * c.a * 255.0).round() as u8,
             (c.a * 255.0).round() as u8,
         ];
-        for chunk in self.buf.chunks_exact_mut(4) {
-            chunk.copy_from_slice(&px);
+        if self.buf.len() < 4 {
+            return;
+        }
+        // One pixel, then keep doubling what is already written. A whole
+        // output is fifty megabytes and a per-pixel loop over it is slow
+        // enough to be felt between frames; this is memmove all the way up.
+        self.buf[..4].copy_from_slice(&px);
+        let mut done = 4;
+        while done < self.buf.len() {
+            let n = done.min(self.buf.len() - done);
+            self.buf.copy_within(0..n, done);
+            done += n;
         }
     }
 
+    /// Source-over-destination on premultiplied bytes. Whole numbers rather
+    /// than floats: this runs once per pixel of every shape drawn, and a
+    /// window's worth of them is felt.
     fn blend_px(&mut self, x: i32, y: i32, c: Color, coverage: f32) {
         if x < 0 || y < 0 || x >= self.w || y >= self.h {
             return;
         }
-        let a = c.a * coverage;
-        if a <= 0.0 {
+        let a = ((c.a * coverage).clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+        if a == 0 {
             return;
         }
         let i = ((y * self.w + x) * 4) as usize;
-        let inv = 1.0 - a;
+        let inv = 255 - a;
         // Memory order for little-endian Argb8888 is B, G, R, A.
-        let src = [c.b * a, c.g * a, c.r * a, a];
+        let src = [c.b, c.g, c.r, 1.0];
         for (off, s) in src.iter().enumerate() {
-            let d = self.buf[i + off] as f32 / 255.0;
-            self.buf[i + off] = ((s + d * inv) * 255.0).round().min(255.0) as u8;
+            let s = (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u32 * a;
+            let d = self.buf[i + off] as u32 * inv;
+            self.buf[i + off] = ((s + d + 127) / 255).min(255) as u8;
         }
     }
 
     /// Paint one color over a box, asking `coverage` how much of each pixel
     /// the shape covers.
-    fn shade<F: Fn(f32, f32) -> f32>(&mut self, bounds: Rect, c: Color, coverage: F) {
+    fn shade<F: Fn(f32, f32) -> f32>(&mut self, bounds: Rect, c: Color, coverage: &F) {
         let x0 = (bounds.x.floor() as i32).max(0);
         let y0 = (bounds.y.floor() as i32).max(0);
         let x1 = ((bounds.x + bounds.w).ceil() as i32).min(self.w);
@@ -126,12 +162,50 @@ impl Canvas<'_> {
         }
     }
 
+    /// Ask `coverage` only about the pixels within `band` of the rectangle's
+    /// edge, and take the rest as given: covered inside, empty outside.
+    ///
+    /// A window-sized outline visits a window's worth of pixels otherwise, and
+    /// the distance measurement behind these shapes is too expensive to spend
+    /// on the middle of a shape whose middle never changes.
+    fn shade_edge<F: Fn(f32, f32) -> f32>(
+        &mut self,
+        r: Rect,
+        band: f32,
+        fill_inside: Option<Color>,
+        c: Color,
+        coverage: F,
+    ) {
+        let outer = r.grow(band);
+        let inner = r.grow(-band);
+        if inner.w <= 0.0 || inner.h <= 0.0 {
+            self.shade(outer, c, &coverage);
+            return;
+        }
+        let (ix, iy, iw, ih) = (inner.x, inner.y, inner.w, inner.h);
+        for band in [
+            Rect::new(outer.x, outer.y, outer.w, iy - outer.y),
+            Rect::new(outer.x, iy + ih, outer.w, outer.y + outer.h - (iy + ih)),
+            Rect::new(outer.x, iy, ix - outer.x, ih),
+            Rect::new(ix + iw, iy, outer.x + outer.w - (ix + iw), ih),
+        ] {
+            self.shade(band, c, &coverage);
+        }
+        if let Some(solid) = fill_inside {
+            self.shade(inner, solid, &|_, _| 1.0);
+        }
+    }
+
     pub fn round_rect(&mut self, r: Rect, radius: f32, c: Color) {
-        self.shade(r.grow(1.0), c, |px, py| 0.5 - r.distance(radius, px, py));
+        let band = radius + 1.0;
+        self.shade_edge(r, band, Some(c), c, |px, py| {
+            0.5 - r.distance(radius, px, py)
+        });
     }
 
     pub fn round_rect_outline(&mut self, r: Rect, radius: f32, t: f32, c: Color) {
-        self.shade(r.grow(t + 1.0), c, |px, py| {
+        let band = radius + t + 1.0;
+        self.shade_edge(r, band, None, c, |px, py| {
             0.5 + t / 2.0 - r.distance(radius, px, py).abs()
         });
     }
@@ -139,7 +213,8 @@ impl Canvas<'_> {
     /// A shadow cast by the shape, fading out over `blur` pixels. Enough to
     /// lift a label off the window under it and off its neighbours.
     pub fn round_rect_shadow(&mut self, r: Rect, radius: f32, blur: f32, c: Color) {
-        self.shade(r.grow(blur), c, |px, py| {
+        let band = radius + blur + 1.0;
+        self.shade_edge(r, band, Some(c), c, |px, py| {
             let t = (1.0 - r.distance(radius, px, py) / blur).clamp(0.0, 1.0);
             t * t
         });
@@ -158,18 +233,21 @@ impl Canvas<'_> {
     ) -> f32 {
         let mut pen = pen;
         for ch in text.chars() {
-            let (m, bitmap) = font.rasterize(ch, px);
-            let x0 = (pen + m.xmin as f32).round() as i32;
-            let y0 = (baseline - m.ymin as f32).round() as i32 - m.height as i32;
-            for row in 0..m.height {
-                for col in 0..m.width {
-                    let cov = bitmap[row * m.width + col] as f32 / 255.0;
-                    if cov > 0.0 {
-                        self.blend_px(x0 + col as i32, y0 + row as i32, c, cov);
+            // Blend straight out of the cache: copying the raster out first
+            // costs an allocation per glyph per frame.
+            pen += with_glyph(font, ch, px, |m, bitmap| {
+                let x0 = (pen + m.xmin as f32).round() as i32;
+                let y0 = (baseline - m.ymin as f32).round() as i32 - m.height as i32;
+                for row in 0..m.height {
+                    for col in 0..m.width {
+                        let cov = bitmap[row * m.width + col] as f32 / 255.0;
+                        if cov > 0.0 {
+                            self.blend_px(x0 + col as i32, y0 + row as i32, c, cov);
+                        }
                     }
                 }
-            }
-            pen += m.advance_width;
+                m.advance_width
+            });
         }
         pen
     }
@@ -190,7 +268,7 @@ pub fn baseline(font: &Font, cy: f32, px: f32) -> f32 {
 
 pub fn text_width(font: &Font, text: &str, px: f32) -> f32 {
     text.chars()
-        .map(|ch| font.metrics(ch, px).advance_width)
+        .map(|ch| with_glyph(font, ch, px, |m, _| m.advance_width))
         .sum()
 }
 

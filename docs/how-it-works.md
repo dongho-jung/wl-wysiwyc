@@ -25,14 +25,21 @@ no pointer input matters: a surface that accepts it pulls the pointer
 off the window underneath, which sees the pointer leave, and a panel
 held open by hover folds up as the overlay opens.
 
-Rendering is plain software drawing into a shared-memory Argb8888
-buffer (`src/draw.rs`): premultiplied alpha and glyphs rasterized with
-fontdue. Every shape is a rounded rectangle measured by
-its signed distance, which is what gives the labels smooth corners,
-outlines of any width, and shadows, all from the same few lines. The
-font comes from `fc-match sans:bold` with fallbacks to common system
-paths. Buffers are rendered at an integer scale of ceil(monitor scale)
-so text stays sharp on fractional-scale outputs.
+Rendering is plain software drawing into a shared-memory Argb8888 buffer
+(`src/draw.rs`): premultiplied alpha and glyphs rasterized with fontdue.
+Every shape is a rounded rectangle measured by its signed distance,
+which is what gives the labels smooth corners, outlines of any width and
+shadows, all from the same few lines. The font comes from `fc-match
+sans:bold` with fallbacks to common system paths. Buffers are rendered
+at an integer scale of ceil(monitor scale) so text stays sharp on
+fractional-scale outputs.
+
+A frame is a whole output, fifty megabytes of it, and the pointer's
+travel is drawn one frame at a time, so three things keep a frame cheap:
+the distance measurement is only taken near a shape's edge, since the
+middle of a shape is either covered or not; glyph rasters are kept
+between frames rather than drawn again each time; and the blending is
+integer arithmetic.
 
 Startup queries the focused window's clickable elements over AT-SPI
 (1.8 s hard timeout, results cached per window). If elements are found
