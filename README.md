@@ -14,12 +14,13 @@ cargo build --release
 ./target/release/wl-wysiwyc
 ```
 
-Keys: type a hint to arm it, then press the same key again to click it
-(`Enter` works too), so nothing is clicked by a single keystroke. Hint
-keys follow the keyboard layout: a target in the top-left corner is
-labelled near `q`, one in the bottom-right near `m`. `Space` switches
+Keys: every key is pressed twice, once to see what it selects and once
+to confirm it, so nothing is clicked by a single keystroke (`Enter`
+confirms too). A hint's keys are where its target is: the keyboard is
+laid over the window, so something in the bottom-left corner is
+labelled `z` and something in the top-right `p`. `Space` switches
 between hints and the letter grid, `Tab` picks another window with
-`1`-`9`, `Backspace` steps back, `Esc` backs out and then quits.
+`1`-`9`, `Backspace` undoes one press, `Esc` backs out and then quits.
 
 Element hints need AT-SPI accessibility enabled on the system; Chromium
 additionally needs a launch flag. See

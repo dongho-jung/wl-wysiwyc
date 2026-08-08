@@ -14,6 +14,14 @@ impl Color {
     pub const fn new(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self { r, g, b, a }
     }
+
+    /// The same color, thinned by a factor: 1.0 keeps it, 0.0 hides it.
+    pub fn fade(self, f: f32) -> Self {
+        Self {
+            a: self.a * f,
+            ..self
+        }
+    }
 }
 
 /// Argb8888 canvas. Wayland expects premultiplied alpha, so every write
