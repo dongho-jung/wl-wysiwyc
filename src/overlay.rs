@@ -57,6 +57,10 @@ const ARMED_TEXT: Color = Color::new(0.0, 0.14, 0.08, 1.0);
 const ARMED_RING: Color = Color::new(0.25, 0.92, 0.63, 0.95);
 const ARMED_GLOW: Color = Color::new(0.25, 0.92, 0.63, 0.5);
 const ARMED_FILL: Color = Color::new(0.24, 0.85, 0.60, 0.14);
+/// The armed key itself, shown pressed inside the labels it keeps.
+const ARMED_CAP: Color = Color::new(0.02, 0.24, 0.15, 0.92);
+const ARMED_CAP_TEXT: Color = Color::new(0.55, 1.0, 0.82, 1.0);
+const HUD_KEY: Color = Color::new(1.0, 1.0, 1.0, 0.14);
 
 /// Label text size and the space around it, both in unscaled pixels.
 const LABEL_PX: f32 = 13.0;
@@ -600,8 +604,16 @@ pub fn render(
         eprintln!("atspi: {e}");
         Vec::new()
     });
+    // Trailing "." means every key confirmed and none armed, the state right
+    // after a confirming press.
     let mut typed = keys.to_string();
-    let armed = typed.pop();
+    let armed = match typed.strip_suffix('.') {
+        Some(rest) => {
+            typed = rest.to_string();
+            None
+        }
+        None => typed.pop(),
+    };
     if els.is_empty() {
         draw_pick_tile(snap, win, armed, &font, &mut canvas, scale);
     } else {
@@ -692,6 +704,12 @@ fn draw_pick_tile(
         canvas.text_centered(font, &letter, cx + s, cy + s, px, SHADOW);
         canvas.text_centered(font, &letter, cx, cy, px, TEXT);
     }
+    let pending = Pending {
+        typed: "",
+        armed,
+        clinches: true,
+    };
+    draw_hud(canvas, font, window_rect(snap, win, scale), pending, s);
 }
 
 /// Where a label sits on screen: buffer pixels, already clamped to the
@@ -818,57 +836,203 @@ fn draw_pick_hint(
         TILE_BORDER,
     );
     let boxes = place_labels(hints, font, (mon.x, mon.y), (canvas.w, canvas.h), scale);
-    for (h, b) in hints.iter().zip(&boxes) {
-        if !h.label.starts_with(typed) {
-            continue;
-        }
-        let hot = preview.as_deref().is_some_and(|p| h.label.starts_with(p));
-        // While a key is armed, what it rules out steps back rather than
-        // competing with what it keeps.
-        let dulled = preview.is_some() && !hot;
-        let fade = if dulled { 0.26 } else { 1.0 };
-        let (ring, bg, edge, text) = if hot {
-            (ARMED_RING, ARMED_BG, ARMED_EDGE, ARMED_TEXT)
-        } else {
-            (
-                HINT_RING.fade(fade),
-                HINT_BG.fade(fade),
-                HINT_EDGE.fade(fade),
-                HINT_TEXT.fade(fade),
-            )
-        };
-        // Outlining every element at once is noise; the outline only earns
-        // its place once a key has narrowed the field.
-        if hot || !typed.is_empty() {
-            let el = Rect::new(
-                ((h.rx - mon.x as f64) * scale as f64) as f32,
-                ((h.ry - mon.y as f64) * scale as f64) as f32,
-                (h.rw * scale as f64) as f32,
-                (h.rh * scale as f64) as f32,
-            );
-            if hot && clinches {
-                canvas.round_rect_shadow(el, 4.0 * s, 6.0 * s, ARMED_GLOW.fade(0.45));
+    // What the armed key keeps is drawn last so nothing can cover it.
+    for pass_hot in [false, true] {
+        for (h, b) in hints.iter().zip(&boxes) {
+            if !h.label.starts_with(typed) {
+                continue;
             }
-            canvas.round_rect_outline(el, 4.0 * s, if hot && clinches { 2.0 * s } else { s }, ring);
+            let hot = preview.as_deref().is_some_and(|p| h.label.starts_with(p));
+            if hot != pass_hot {
+                continue;
+            }
+            // While a key is armed, what it rules out steps well back rather
+            // than competing with what it keeps.
+            let dulled = preview.is_some() && !hot;
+            let fade = if dulled { 0.18 } else { 1.0 };
+            let (ring, bg, edge, text) = if hot {
+                (ARMED_RING, ARMED_BG, ARMED_EDGE, ARMED_TEXT)
+            } else {
+                (
+                    HINT_RING.fade(fade),
+                    HINT_BG.fade(fade),
+                    HINT_EDGE.fade(fade),
+                    HINT_TEXT.fade(fade),
+                )
+            };
+            // Outlining every element at once is noise; the outline only
+            // earns its place once a key has narrowed the field.
+            if hot || !typed.is_empty() {
+                let el = Rect::new(
+                    ((h.rx - mon.x as f64) * scale as f64) as f32,
+                    ((h.ry - mon.y as f64) * scale as f64) as f32,
+                    (h.rw * scale as f64) as f32,
+                    (h.rh * scale as f64) as f32,
+                );
+                if hot && clinches {
+                    canvas.round_rect_shadow(el, 4.0 * s, 6.0 * s, ARMED_GLOW.fade(0.45));
+                }
+                let t = if hot && clinches { 2.0 * s } else { s };
+                canvas.round_rect_outline(el, 4.0 * s, t, ring);
+            }
+            // An armed label grows a little, on top of turning green.
+            let r = if hot {
+                b.rect().grow(1.5 * s)
+            } else {
+                b.rect()
+            };
+            let radius = r.h * 0.3;
+            if hot && clinches {
+                canvas.round_rect_shadow(r, radius, 7.0 * s, ARMED_GLOW);
+            } else if !dulled {
+                canvas.round_rect_shadow(r.shift(0.0, 1.2 * s), radius, 3.5 * s, SHADOW);
+            }
+            canvas.round_rect(r, radius, bg);
+            canvas.round_rect_outline(r, radius, s, edge);
+            draw_label_text(canvas, font, r, &h.label, typed.len(), hot, px, text, s);
         }
-        let label = h.label.to_ascii_uppercase();
-        let (cx, cy) = (b.x as f32 + b.w as f32 / 2.0, b.y as f32 + b.h as f32 / 2.0);
-        let radius = b.h as f32 * 0.3;
-        if hot && clinches {
-            canvas.round_rect_shadow(b.rect(), radius, 7.0 * s, ARMED_GLOW);
-        } else if !dulled {
-            canvas.round_rect_shadow(b.rect().shift(0.0, 1.2 * s), radius, 3.5 * s, SHADOW);
-        }
-        canvas.round_rect(b.rect(), radius, bg);
-        canvas.round_rect_outline(b.rect(), radius, s, edge);
-        // The keys already confirmed stay in place and step back, so the
-        // label keeps its size and shows how far along it is.
-        let (done, rest) = label.split_at(typed.len());
-        let pen = cx - draw::text_width(font, &label, px) / 2.0;
-        let base = draw::baseline(font, cy, px);
-        let pen = canvas.text_run(font, done, pen, base, px, text.fade(0.3));
-        canvas.text_run(font, rest, pen, base, px, text);
     }
+    let pending = Pending {
+        typed,
+        armed,
+        clinches,
+    };
+    draw_hud(canvas, font, window_rect(snap, win, scale), pending, s);
+}
+
+/// The label's own text: keys already confirmed step back, the armed key
+/// wears a pressed cap, and what is still to come stays plain.
+#[allow(clippy::too_many_arguments)]
+fn draw_label_text(
+    canvas: &mut Canvas,
+    font: &Font,
+    r: Rect,
+    label: &str,
+    done: usize,
+    hot: bool,
+    px: f32,
+    text: Color,
+    s: f32,
+) {
+    let label = label.to_ascii_uppercase();
+    let base = draw::baseline(font, r.y + r.h / 2.0, px);
+    let pen = r.x + (r.w - draw::text_width(font, &label, px)) / 2.0;
+    let (done, rest) = label.split_at(done);
+    let pen = canvas.text_run(font, done, pen, base, px, text.fade(0.35));
+    if !hot {
+        canvas.text_run(font, rest, pen, base, px, text);
+        return;
+    }
+    // The armed key is the first one left. Showing it pressed, rather than
+    // only tinting the whole label, is what says a key is waiting on a
+    // second press.
+    let (armed, tail) = rest.split_at(rest.chars().next().map_or(0, char::len_utf8));
+    let cap = Rect::new(
+        pen - 1.5 * s,
+        r.y + 2.5 * s,
+        draw::text_width(font, armed, px) + 3.0 * s,
+        r.h - 5.0 * s,
+    );
+    canvas.round_rect(cap, cap.h * 0.3, ARMED_CAP);
+    let pen = canvas.text_run(font, armed, pen, base, px, ARMED_CAP_TEXT);
+    canvas.text_run(font, tail, pen, base, px, text);
+}
+
+/// The window being hinted, in buffer pixels.
+fn window_rect(snap: &Snapshot, win: usize, scale: i32) -> Rect {
+    let (mon, w) = (&snap.monitor, &snap.windows[win]);
+    Rect::new(
+        ((w.x - mon.x) * scale) as f32,
+        ((w.y - mon.y) * scale) as f32,
+        (w.w * scale) as f32,
+        (w.h * scale) as f32,
+    )
+}
+
+/// A strip along the bottom of the window naming the keys confirmed so far,
+/// the key waiting on a second press, and what that press will do. Two
+/// presses per key only works if the first one visibly asks a question
+/// instead of looking like an answer.
+/// The key press that has not been confirmed yet, and what confirming it
+/// would do.
+struct Pending<'a> {
+    typed: &'a str,
+    armed: Option<char>,
+    clinches: bool,
+}
+
+fn draw_hud(canvas: &mut Canvas, font: &Font, win: Rect, pending: Pending, s: f32) {
+    let Pending {
+        typed,
+        armed,
+        clinches,
+    } = pending;
+    if armed.is_none() && typed.is_empty() {
+        return;
+    }
+    let px = 15.0 * s;
+    let cap = px * 1.75;
+    let gap = 6.0 * s;
+    let pad = 14.0 * s;
+    let keys: Vec<(char, bool)> = typed
+        .chars()
+        .map(|c| (c, false))
+        .chain(armed.map(|c| (c, true)))
+        .collect();
+    let msg = match (armed.is_some(), clinches) {
+        (true, true) => "press again to click",
+        (true, false) => "press again to confirm",
+        (false, _) => "confirmed, next key",
+    };
+    let keys_w = keys.len() as f32 * (cap + gap) + gap;
+    let panel = Rect::new(
+        0.0,
+        0.0,
+        pad * 2.0 + keys_w + draw::text_width(font, msg, px),
+        cap + pad,
+    );
+    let panel = Rect::new(
+        (win.x + (win.w - panel.w) / 2.0).clamp(0.0, (canvas.w as f32 - panel.w).max(0.0)),
+        (win.y + win.h - panel.h - 28.0 * s).clamp(0.0, (canvas.h as f32 - panel.h).max(0.0)),
+        panel.w,
+        panel.h,
+    );
+    let radius = panel.h * 0.32;
+    canvas.round_rect_shadow(panel.shift(0.0, 2.0 * s), radius, 10.0 * s, SHADOW);
+    canvas.round_rect(panel, radius, BOX_BG);
+    canvas.round_rect_outline(panel, radius, s, BOX_BORDER.fade(0.35));
+    let mut x = panel.x + pad;
+    for (ch, hot) in keys {
+        let key = Rect::new(x, panel.y + (panel.h - cap) / 2.0, cap, cap);
+        canvas.round_rect(key, cap * 0.26, if hot { ARMED_BG } else { HUD_KEY });
+        canvas.round_rect_outline(
+            key,
+            cap * 0.26,
+            s,
+            if hot {
+                ARMED_RING
+            } else {
+                BOX_BORDER.fade(0.4)
+            },
+        );
+        canvas.text_centered(
+            font,
+            &ch.to_ascii_uppercase().to_string(),
+            key.x + cap / 2.0,
+            key.y + cap / 2.0,
+            px,
+            if hot { ARMED_TEXT } else { TEXT.fade(0.75) },
+        );
+        x += cap + gap;
+    }
+    canvas.text_run(
+        font,
+        msg,
+        x + gap,
+        draw::baseline(font, panel.y + panel.h / 2.0, px),
+        px,
+        TEXT.fade(0.9),
+    );
 }
 
 impl CompositorHandler for App {

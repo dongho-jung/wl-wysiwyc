@@ -28,7 +28,8 @@ Usage:
                              write what the overlay would draw to FILE as a
                              PPM, without showing anything. KEYS is a run of
                              presses: all but the last confirmed, the last
-                             one armed (debugging aid)
+                             one armed, or all of them with a trailing dot
+                             (debugging aid)
   wl-wysiwyc --move-test X Y move the cursor to global (X, Y) through the
                              virtual pointer, no click (debugging aid)
   wl-wysiwyc --help          show this help
