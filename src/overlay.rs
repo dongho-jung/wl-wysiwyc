@@ -31,8 +31,10 @@ use smithay_client_toolkit::{
     shm::{slot::SlotPool, Shm, ShmHandler},
 };
 use std::error::Error;
+use std::io::ErrorKind;
 use std::time::{Duration, Instant};
 use wayland_client::{
+    backend::WaylandError,
     globals::{registry_queue_init, GlobalListContents},
     protocol::{
         wl_keyboard, wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm, wl_surface,
@@ -67,6 +69,11 @@ const ARMED_FILL: Color = Color::new(0.24, 0.85, 0.60, 0.14);
 /// The armed key itself, shown pressed inside the labels it keeps.
 const ARMED_CAP: Color = Color::new(0.02, 0.24, 0.15, 0.92);
 const ARMED_CAP_TEXT: Color = Color::new(0.55, 1.0, 0.82, 1.0);
+
+/// How long an armed key waits before confirming itself. Long enough to see
+/// what it selected and press something else instead, short enough that the
+/// second press is a shortcut rather than the only way through.
+const AUTO_CONFIRM: Duration = Duration::from_millis(300);
 
 /// Label text size and the space around it, both in unscaled pixels.
 const LABEL_PX: f32 = 11.5;
@@ -134,8 +141,10 @@ struct App {
     /// Keys already confirmed, narrowing the hints.
     typed: String,
     /// A key pressed once and not confirmed yet: it previews what it would
-    /// select, and pressing it again commits it.
+    /// select, and pressing it again commits it. It also commits on its own
+    /// shortly after, so the second press is a shortcut rather than a toll.
     armed: Option<char>,
+    armed_at: Option<Instant>,
     elements_cache: HashMap<usize, Vec<Element>>,
     pending_pick: Option<usize>,
 }
@@ -196,6 +205,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         hints: Vec::new(),
         typed: String::new(),
         armed: None,
+        armed_at: None,
         elements_cache: HashMap::new(),
         pending_pick,
     };
@@ -251,8 +261,25 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         }
     } else {
         while !app.exit {
-            queue.blocking_dispatch(&mut app)?;
+            // Wait for either the compositor or the armed key's own clock,
+            // whichever comes first.
+            queue.flush()?;
+            if let Some(guard) = queue.prepare_read() {
+                let wait = app.arm_deadline().unwrap_or(Duration::from_secs(1));
+                if readable(&conn, wait) {
+                    match guard.read() {
+                        // Woken with nothing to read: someone else drained
+                        // the socket, or the wakeup was spurious.
+                        Err(WaylandError::Io(e)) if e.kind() == ErrorKind::WouldBlock => {}
+                        other => {
+                            other?;
+                        }
+                    }
+                }
+            }
+            queue.dispatch_pending(&mut app)?;
             app.process_pending_pick();
+            app.expire_armed();
             if app.configured && app.dirty {
                 app.draw();
             }
@@ -278,6 +305,20 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         queue.roundtrip(&mut app)?;
     }
     Ok(app.target)
+}
+
+/// Wait for the compositor to have something to say, or for the timeout to
+/// run out, whichever happens first.
+fn readable(conn: &Connection, timeout: Duration) -> bool {
+    use std::os::fd::{AsFd, AsRawFd};
+    let mut poll = libc::pollfd {
+        fd: conn.as_fd().as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    // SAFETY: one initialized pollfd, and a length that matches it.
+    unsafe { libc::poll(&mut poll, 1, ms) > 0 }
 }
 
 /// Debug helper: move the cursor through the virtual pointer, no click.
@@ -392,7 +433,7 @@ impl App {
     /// Esc unwinds one step at a time: drop the armed key, then everything
     /// confirmed so far, then quit.
     fn cancel(&mut self) {
-        if self.armed.take().is_some() {
+        if self.disarm().is_some() {
             self.dirty = true;
             return;
         }
@@ -407,15 +448,55 @@ impl App {
     /// Backspace undoes one key press: the armed key if there is one, the
     /// last confirmed one otherwise.
     fn undo(&mut self) {
-        if self.armed.take().is_some() || self.typed.pop().is_some() {
+        if self.disarm().is_some() || self.typed.pop().is_some() {
             self.dirty = true;
         }
     }
 
     fn reset_input(&mut self) {
         self.typed.clear();
-        self.armed = None;
+        self.disarm();
         self.dirty = true;
+    }
+
+    fn arm(&mut self, ch: char) {
+        self.armed = Some(ch);
+        self.armed_at = Some(Instant::now());
+        self.dirty = true;
+    }
+
+    fn disarm(&mut self) -> Option<char> {
+        self.armed_at = None;
+        self.armed.take()
+    }
+
+    /// Confirm an armed key that has been waiting long enough. This is what
+    /// makes the second press optional.
+    fn expire_armed(&mut self) {
+        if self.armed_at.is_some_and(|at| at.elapsed() >= AUTO_CONFIRM) {
+            self.commit_key();
+        }
+    }
+
+    /// How long until the armed key confirms itself, if one is armed.
+    fn arm_deadline(&self) -> Option<Duration> {
+        self.armed_at
+            .map(|at| AUTO_CONFIRM.saturating_sub(at.elapsed()))
+    }
+
+    /// Whether confirming this key would click rather than narrow. A key that
+    /// would click is never confirmed by pressing a different one: that press
+    /// means the target was wrong.
+    fn would_click(&self, ch: char) -> bool {
+        match self.stage {
+            Stage::PickTile { .. } => true,
+            Stage::PickHint { .. } => {
+                let mut probe = self.typed.clone();
+                probe.push(ch);
+                self.hints.iter().any(|h| h.label == probe)
+            }
+            Stage::PickWindow => false,
+        }
     }
 
     fn pick_window(&mut self) {
@@ -442,7 +523,7 @@ impl App {
     /// Confirm the armed key. Enter does this; so does pressing that key a
     /// second time.
     fn commit_key(&mut self) {
-        let Some(ch) = self.armed.take() else {
+        let Some(ch) = self.disarm() else {
             return;
         };
         self.dirty = true;
@@ -471,10 +552,11 @@ impl App {
             self.commit_key();
             return;
         }
+        // Another letter aims somewhere else, so the armed tile is dropped
+        // rather than confirmed: confirming it would click it.
         let w = &self.snap.windows[win];
         if grid::tile_for(w.w as f64, w.h as f64, ch).is_some() {
-            self.armed = Some(ch);
-            self.dirty = true;
+            self.arm(ch);
         }
     }
 
@@ -490,9 +572,23 @@ impl App {
             self.commit_key();
             return;
         }
+        if let Some(armed) = self.armed {
+            // Typing on: a key that only narrows has served its purpose and
+            // is confirmed by the next one, which is what makes a two-key
+            // hint two presses when typed at speed. A key that would click
+            // is dropped instead, since this press says it was the wrong
+            // target.
+            if self.would_click(armed) {
+                self.disarm();
+            } else {
+                self.commit_key();
+                if self.exit {
+                    return;
+                }
+            }
+        }
         if self.leads_anywhere(ch) {
-            self.armed = Some(ch);
-            self.dirty = true;
+            self.arm(ch);
         }
     }
 

@@ -71,11 +71,18 @@ all.
 
 ### Arming
 
-No key press commits on its own. The first press of a key arms it:
+No key press commits on the way down. The first press of a key arms it:
 whatever that key would select turns green and the rest steps back.
 Pressing the same key again, or Enter, confirms it, and confirming the
-last key of a hint clicks that element. Another key moves the preview,
-Backspace undoes one press, and a key that leads nowhere is ignored.
+last key of a hint clicks that element. An armed key also confirms
+itself once it has been waiting 300 ms, so the second press is a
+shortcut past the wait rather than a toll on every key. Backspace undoes
+one press, and a key that leads nowhere is ignored.
+
+Typing on has the same effect as waiting: a key that would only narrow
+the field is confirmed by the next key, so a two-key hint typed at speed
+is two presses. A key that would click is not, since a further key press
+says the target was wrong.
 
 An armed key is drawn pressed inside every label it would keep, a dark
 cap over that one character, and those labels turn green. One that

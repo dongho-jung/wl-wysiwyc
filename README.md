@@ -21,6 +21,8 @@ laid over the window, so something in the bottom-left corner is
 labelled `z` and something in the top-right `p`. `Space` switches
 between hints and the letter grid, `Tab` picks another window with
 `1`-`9`, `Backspace` undoes one press, `Esc` backs out and then quits.
+An armed key also confirms itself after a moment, so the second press is
+a shortcut rather than a toll.
 
 Element hints need AT-SPI accessibility enabled on the system; Chromium
 additionally needs a launch flag. See

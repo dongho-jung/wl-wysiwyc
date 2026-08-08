@@ -1173,6 +1173,7 @@ name = "wl-wysiwyc"
 version = "0.1.0"
 dependencies = [
  "fontdue",
+ "libc",
  "serde",
  "serde_json",
  "smithay-client-toolkit",
