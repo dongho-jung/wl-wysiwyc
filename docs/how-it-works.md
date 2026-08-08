@@ -105,6 +105,8 @@ labels turn green.
 Esc unwinds one step at a time: the armed key, then the target, then
 what was typed, then the overlay. Backspace undoes one key press. Space
 swaps element hints for the letter grid. Tab opens the window picker.
+Triggering the tool again while it is up cancels it, so whatever key
+starts it also stops it.
 
 ### Hint mode
 

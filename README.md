@@ -20,8 +20,9 @@ instead. A hint's keys are where its target is: the keyboard is laid
 over the window, so something in the bottom-left corner is labelled `z`
 and something in the top-right `p`. `Space` switches between hints and
 the letter grid, `Tab` picks another window with `1`-`9`, `Backspace`
-undoes one press, `Esc` backs out and then quits. `Ctrl+Esc` gets the
-keyboard back if a run is killed before it can tidy up.
+undoes one press, `Esc` backs out and then quits, and running the tool
+again while it is up cancels it. `Ctrl+Esc` gets the keyboard back if a
+run is killed before it can tidy up.
 
 Colours, label sizing, the confirm delay, and the limits on reading a
 window are set in `~/.config/wl-wysiwyc/config.yaml`, which is optional:

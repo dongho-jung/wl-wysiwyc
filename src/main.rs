@@ -8,13 +8,15 @@ mod overlay;
 mod shortcuts;
 
 use std::error::Error;
+use std::process::Command;
 use std::time::Duration;
 
 const USAGE: &str = "\
 wl-wysiwyc: keyboard-driven window clicking for Hyprland
 
 Usage:
-  wl-wysiwyc                 interactive: hints the focused window right away.
+  wl-wysiwyc                 interactive: hints the focused window right away,
+                             or cancels an overlay that is already up.
                              Type a hint to arm it, press the same key again
                              to click. Space switches to the qwerty letter
                              grid, Tab picks another window, Esc backs out
@@ -190,7 +192,46 @@ fn render(path: &str, n: Option<usize>, keys: &str) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
+/// Another overlay is already up, so this launch means cancel it. The
+/// keybind that starts the tool is the natural way to change your mind, and
+/// pressing it twice should not leave two overlays fighting over the
+/// keyboard.
+fn cancel_running() -> bool {
+    let me = std::process::id();
+    let out = match Command::new("pgrep")
+        .args(["-x", env!("CARGO_PKG_NAME")])
+        .output()
+    {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let others: Vec<u32> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().parse().ok())
+        .filter(|&pid: &u32| pid != me)
+        .collect();
+    if others.is_empty() {
+        return false;
+    }
+    for pid in others {
+        // SAFETY: a signal to a pid read back from pgrep; a stale pid is an
+        // error the kernel reports rather than a signal to something else,
+        // since pids are not reused while the process is still being waited
+        // on by its parent.
+        unsafe { libc::kill(pid as i32, libc::SIGTERM) };
+    }
+    // The overlay being cancelled cannot put the keyboard back itself, since
+    // a signal runs no destructors.
+    if let Err(e) = hypr::leave_submap() {
+        eprintln!("cancel: {e}");
+    }
+    true
+}
+
 fn interactive(smoke: Option<overlay::Smoke>) -> Result<(), Box<dyn Error>> {
+    if smoke.is_none() && cancel_running() {
+        return Ok(());
+    }
     let snap = hypr::snapshot()?;
     if snap.windows.is_empty() {
         return Err("no windows on the active workspace".into());
