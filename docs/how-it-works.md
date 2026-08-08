@@ -1,8 +1,8 @@
 # How it works
 
-The tool runs in three steps: snapshot, overlay, click. Stage two of
-the overlay has two modes: element hints (preferred) and the letter
-grid (fallback).
+The tool runs in three steps: snapshot, overlay, click. The overlay
+opens on the focused window in one of two modes: element hints
+(preferred) and the letter grid (fallback).
 
 ## Snapshot
 
@@ -10,9 +10,11 @@ grid (fallback).
 clients`. It keeps windows that are mapped, not hidden, visible (this
 drops inactive tabs of a Hyprland group), and on the active workspace
 of the focused monitor. Windows are sorted top-to-bottom then
-left-to-right and capped at nine, since selection keys are 1-9. The
-snapshot also records each window's pid, the focused monitor's logical
-geometry, and the bounding box of the whole output layout.
+left-to-right and capped at nine, since picker keys are 1-9; the
+focused window (`focusHistoryID` 0) keeps its place even when it sorts
+past the ninth, because that is where the overlay starts. The snapshot
+also records each window's pid, the focused monitor's logical geometry,
+and the bounding box of the whole output layout.
 
 ## Overlay
 
@@ -26,10 +28,11 @@ sans:bold` with fallbacks to common system paths. Buffers are rendered
 at an integer scale of ceil(monitor scale) so text stays sharp on
 fractional-scale outputs.
 
-Stage one draws a numbered label on every window. Pressing a digit
-queries the window's clickable elements over AT-SPI (1.8 s hard
-timeout, results cached per window). If elements are found the overlay
-enters hint mode; otherwise it falls back to the grid.
+Startup queries the focused window's clickable elements over AT-SPI
+(1.8 s hard timeout, results cached per window). If elements are found
+the overlay opens in hint mode; otherwise it falls back to the grid.
+Tab opens the window picker, which draws a number on every window and
+switches to that window on 1-9.
 
 ### Hint mode
 
@@ -112,13 +115,13 @@ extent, then a left button press and release.
 ## Debug flags
 
 - `--list` prints the snapshot: monitor, layout extent, and the
-  windows with their geometry.
-- `--elements N` prints the clickable elements detected for window N
-  with roles and window-relative rectangles.
-- `--smoke MS [N]` renders the overlay for MS milliseconds without
-  grabbing the keyboard. With N it shows the letter grid for window N.
-- `--smoke-hints MS N` is like `--smoke` but queries and shows the
-  element hints for window N.
+  windows with their geometry, marking the focused one.
+- `--elements [N]` prints the clickable elements detected for window N,
+  or for the focused window, with roles and window-relative rectangles.
+- `--smoke MS [N]` renders the hint overlay for MS milliseconds without
+  grabbing the keyboard, for window N or the focused window.
+- `--smoke-grid MS [N]` is the same for the letter grid,
+  `--smoke-pick MS` for the window picker.
 - `--move-test X Y` moves the cursor to global (X, Y) through the
   virtual pointer without clicking. Verifies coordinate mapping.
 

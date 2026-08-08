@@ -35,10 +35,18 @@ struct ClientJson {
     class: String,
     title: String,
     pid: i32,
+    // 0 is the focused window. Older Hyprland versions do not report this
+    // field; those clients sort last and the first window wins instead.
+    #[serde(rename = "focusHistoryID", default = "default_focus_id")]
+    focus_history_id: i64,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_focus_id() -> i64 {
+    i64::MAX
 }
 
 #[derive(Debug, Clone)]
@@ -66,6 +74,8 @@ pub struct Window {
 pub struct Snapshot {
     pub monitor: Monitor,
     pub windows: Vec<Window>,
+    /// Index into `windows` of the focused window, where the overlay starts.
+    pub focused: usize,
     /// Bottom-right corner of the whole output layout, logical pixels.
     /// Used as the extent for virtual-pointer absolute motion.
     pub layout_extent: (i32, i32),
@@ -123,7 +133,7 @@ pub fn snapshot() -> Result<Snapshot, Box<dyn Error>> {
     };
 
     let ws = focused.active_workspace.id;
-    let mut windows: Vec<Window> = clients
+    let mut kept: Vec<ClientJson> = clients
         .into_iter()
         .filter(|c| {
             c.mapped
@@ -133,6 +143,25 @@ pub fn snapshot() -> Result<Snapshot, Box<dyn Error>> {
                 && c.size[0] > 0
                 && c.size[1] > 0
         })
+        .collect();
+    kept.sort_by_key(|c| (c.at[1], c.at[0]));
+
+    let mut focused_idx = kept
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, c)| c.focus_history_id)
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    // Picker keys are 1-9, so anything past nine windows is unreachable there.
+    // The focused window is where the overlay starts, so keep it either way.
+    if focused_idx >= 9 {
+        kept.swap(8, focused_idx);
+        focused_idx = 8;
+    }
+    kept.truncate(9);
+
+    let windows: Vec<Window> = kept
+        .into_iter()
         .map(|c| Window {
             class: c.class,
             title: c.title,
@@ -143,11 +172,9 @@ pub fn snapshot() -> Result<Snapshot, Box<dyn Error>> {
             h: c.size[1],
         })
         .collect();
-    windows.sort_by_key(|w| (w.y, w.x));
-    // Selection keys are 1-9, so anything past nine windows is unreachable.
-    windows.truncate(9);
 
     Ok(Snapshot {
+        focused: focused_idx.min(windows.len().saturating_sub(1)),
         monitor,
         windows,
         layout_extent: extent,

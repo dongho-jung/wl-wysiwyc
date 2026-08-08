@@ -50,14 +50,17 @@ const HINT_EDGE: Color = Color::new(0.35, 0.24, 0.02, 0.9);
 const HINT_TEXT: Color = Color::new(0.12, 0.08, 0.0, 1.0);
 const HINT_RING: Color = Color::new(1.0, 0.85, 0.3, 0.5);
 
+/// What a smoke run should render. The window index is 1-based; None means
+/// the focused window, the same one the overlay starts on.
+pub enum SmokeView {
+    Hints(Option<usize>),
+    Grid(Option<usize>),
+    Picker,
+}
+
 pub struct Smoke {
     pub duration: Duration,
-    /// 1-based window index; when set, render the letter grid for that
-    /// window instead of the window picker.
-    pub grid_window: Option<usize>,
-    /// 1-based window index; when set, query clickable elements and render
-    /// the hint overlay for that window.
-    pub hints_window: Option<usize>,
+    pub view: SmokeView,
 }
 
 #[derive(Clone, Copy)]
@@ -119,9 +122,23 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
     let pool = SlotPool::new(4096, &shm)?;
     let vp_manager: Option<ZwlrVirtualPointerManagerV1> = globals.bind(&qh, 1..=2, ()).ok();
 
-    let stage = match smoke.as_ref().and_then(|s| s.grid_window) {
-        Some(n) if n >= 1 && n <= snap.windows.len() => Stage::PickTile { win: n - 1 },
-        _ => Stage::PickWindow,
+    // A 1-based window number from the command line, the focused window when
+    // there is none, and the focused window again when the number is out of
+    // range.
+    let window_or_focused = |n: Option<usize>| match n {
+        Some(n) if n >= 1 && n <= snap.windows.len() => n - 1,
+        _ => snap.focused,
+    };
+    let (stage, pending_pick) = match smoke.as_ref().map(|s| &s.view) {
+        Some(SmokeView::Picker) => (Stage::PickWindow, None),
+        Some(SmokeView::Grid(n)) => (
+            Stage::PickTile {
+                win: window_or_focused(*n),
+            },
+            None,
+        ),
+        Some(SmokeView::Hints(n)) => (Stage::PickWindow, Some(window_or_focused(*n))),
+        None => (Stage::PickWindow, Some(snap.focused)),
     };
     let buffer_scale = (snap.monitor.scale.ceil() as i32).max(1);
 
@@ -146,19 +163,12 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         hints: Vec::new(),
         typed: String::new(),
         elements_cache: HashMap::new(),
-        pending_pick: None,
+        pending_pick,
     };
 
     // Output names arrive with the initial burst of globals metadata.
     queue.roundtrip(&mut app)?;
     let output = app.find_output();
-
-    if let Some(n) = smoke.as_ref().and_then(|s| s.hints_window) {
-        if (1..=app.snap.windows.len()).contains(&n) {
-            app.pending_pick = Some(n - 1);
-            app.process_pending_pick();
-        }
-    }
 
     let surface = compositor.create_surface(&qh);
     let layer = layer_shell.create_layer_surface(
@@ -183,6 +193,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         let start = Instant::now();
         while start.elapsed() < smoke.duration {
             queue.roundtrip(&mut app)?;
+            app.process_pending_pick();
             if app.configured && app.dirty {
                 app.draw();
             }
@@ -285,6 +296,10 @@ impl App {
     }
 
     fn handle_key(&mut self, event: KeyEvent) {
+        if event.keysym == Keysym::Tab {
+            self.pick_window();
+            return;
+        }
         if event.keysym == Keysym::Escape {
             match self.stage {
                 Stage::PickHint { .. } if !self.typed.is_empty() => {
@@ -367,6 +382,17 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Leave the window the overlay opened on and choose another one by
+    /// number.
+    fn pick_window(&mut self) {
+        if matches!(self.stage, Stage::PickWindow) {
+            return;
+        }
+        self.stage = Stage::PickWindow;
+        self.typed.clear();
+        self.dirty = true;
     }
 
     /// A window was picked: query its clickable elements (with a hard timeout

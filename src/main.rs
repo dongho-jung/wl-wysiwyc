@@ -12,18 +12,18 @@ const USAGE: &str = "\
 wl-wysiwyc: keyboard-driven window clicking for Hyprland
 
 Usage:
-  wl-wysiwyc                 interactive: pick a window by number (1-9), then
-                             type the hint of a clickable element; Space
-                             switches to the qwerty letter grid, Esc goes back
+  wl-wysiwyc                 interactive: hints the focused window right away.
+                             Type a hint to arm it, press the same key again
+                             to click. Space switches to the qwerty letter
+                             grid, Tab picks another window, Esc backs out
   wl-wysiwyc --list          print the windows that would be shown
-  wl-wysiwyc --elements N    print the clickable elements detected for
-                             window N (debugging aid)
-  wl-wysiwyc --smoke MS [N]  render the overlay for MS milliseconds without
-                             grabbing the keyboard; with N, show the letter
-                             grid for window N instead (debugging aid)
-  wl-wysiwyc --smoke-hints MS N
-                             like --smoke but shows the element hints for
-                             window N (debugging aid)
+  wl-wysiwyc --elements [N]  print the clickable elements detected for
+                             window N, or the focused window (debugging aid)
+  wl-wysiwyc --smoke MS [N]  render the hint overlay for MS milliseconds
+                             without grabbing the keyboard (debugging aid)
+  wl-wysiwyc --smoke-grid MS [N]
+                             like --smoke but shows the letter grid
+  wl-wysiwyc --smoke-pick MS like --smoke but shows the window picker
   wl-wysiwyc --move-test X Y move the cursor to global (X, Y) through the
                              virtual pointer, no click (debugging aid)
   wl-wysiwyc --help          show this help
@@ -38,43 +38,34 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
+    let flag = args.first().map(String::as_str);
+    let opt_window = |i: usize| match args.get(i) {
+        Some(n) => n.parse::<usize>().map(Some),
+        None => Ok(None),
+    };
+    let smoke = |i: usize, view: overlay::SmokeView| -> Result<overlay::Smoke, Box<dyn Error>> {
+        let ms: u64 = args
+            .get(i)
+            .ok_or_else(|| format!("{} needs a duration in milliseconds", flag.unwrap_or("")))?
+            .parse()?;
+        Ok(overlay::Smoke {
+            duration: Duration::from_millis(ms),
+            view,
+        })
+    };
+    match flag {
         None => interactive(None),
         Some("--list") => list(),
-        Some("--elements") => {
-            let n: usize = args.get(1).ok_or("--elements needs a window number")?.parse()?;
-            elements(n)
-        }
+        Some("--elements") => elements(opt_window(1)?),
         Some("--smoke") => {
-            let ms: u64 = args
-                .get(1)
-                .ok_or("--smoke needs a duration in milliseconds")?
-                .parse()?;
-            let stage_win = match args.get(2) {
-                Some(n) => Some(n.parse::<usize>()?),
-                None => None,
-            };
-            interactive(Some(overlay::Smoke {
-                duration: Duration::from_millis(ms),
-                grid_window: stage_win,
-                hints_window: None,
-            }))
+            let view = overlay::SmokeView::Hints(opt_window(2)?);
+            interactive(Some(smoke(1, view)?))
         }
-        Some("--smoke-hints") => {
-            let ms: u64 = args
-                .get(1)
-                .ok_or("--smoke-hints needs a duration in milliseconds")?
-                .parse()?;
-            let n: usize = args
-                .get(2)
-                .ok_or("--smoke-hints needs a window number")?
-                .parse()?;
-            interactive(Some(overlay::Smoke {
-                duration: Duration::from_millis(ms),
-                grid_window: None,
-                hints_window: Some(n),
-            }))
+        Some("--smoke-grid") => {
+            let view = overlay::SmokeView::Grid(opt_window(2)?);
+            interactive(Some(smoke(1, view)?))
         }
+        Some("--smoke-pick") => interactive(Some(smoke(1, overlay::SmokeView::Picker)?)),
         Some("--move-test") => {
             let x: f64 = args.get(1).ok_or("--move-test needs X and Y")?.parse()?;
             let y: f64 = args.get(2).ok_or("--move-test needs X and Y")?.parse()?;
@@ -102,8 +93,9 @@ fn list() -> Result<(), Box<dyn Error>> {
     );
     for (i, w) in snap.windows.iter().enumerate() {
         println!(
-            "{}: at ({}, {}) size {}x{} [{}] {}",
+            "{}:{} at ({}, {}) size {}x{} [{}] {}",
             i + 1,
+            if i == snap.focused { " focused" } else { "" },
             w.x,
             w.y,
             w.w,
@@ -115,13 +107,14 @@ fn list() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn elements(n: usize) -> Result<(), Box<dyn Error>> {
+fn elements(n: Option<usize>) -> Result<(), Box<dyn Error>> {
     let snap = hypr::snapshot()?;
-    let w = snap
-        .windows
-        .get(n.checked_sub(1).ok_or("window numbers start at 1")?)
-        .ok_or("no such window; see --list")?;
-    println!("window {}: [{}] {}", n, w.class, w.title);
+    let idx = match n {
+        Some(n) => n.checked_sub(1).ok_or("window numbers start at 1")?,
+        None => snap.focused,
+    };
+    let w = snap.windows.get(idx).ok_or("no such window; see --list")?;
+    println!("window {}: [{}] {}", idx + 1, w.class, w.title);
     let els = atspi::clickable_elements(w.pid, &w.title)?;
     println!("{} clickable elements (window-relative logical):", els.len());
     for e in &els {
