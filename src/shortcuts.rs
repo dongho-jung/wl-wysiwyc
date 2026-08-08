@@ -90,11 +90,13 @@ impl Key {
 /// Every key the overlay listens for: hint letters, window numbers, the mode
 /// toggle, the ones that back out, and the ones that click. A letter the
 /// config gave to a click key is registered once, as that click key, so the
-/// compositor is never asked to bind the same name twice.
+/// compositor is never asked to bind the same name twice. An excluded letter
+/// is still bound, and still does nothing: a key the submap has no bind for
+/// falls through to the window underneath, which would type into it.
 pub fn keys() -> Vec<Key> {
-    let reserved = crate::config::get().keys.reserved_letters();
+    let taken = crate::config::get().keys.taken_letters();
     let mut out: Vec<Key> = ('a'..='z')
-        .filter(|c| !reserved.contains(c))
+        .filter(|c| !taken.contains(c))
         .map(Key::Char)
         .collect();
     out.extend(('1'..='9').map(Key::Char));

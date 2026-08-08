@@ -71,6 +71,24 @@ pub struct Keys {
     /// belongs to it, so pressing it again undoes a wrong turn instead of
     /// doing nothing. Empty means no such key.
     pub reset: String,
+    /// The keyboard the labels are laid out on, so that where an element is
+    /// on screen decides which key names it.
+    pub layout: Layout,
+    /// Letters to keep out of hints and the grid, run together: `excluded:
+    /// tyughvbn`. For the keys you would rather not have to reach for.
+    pub excluded: String,
+}
+
+/// Which keyboard the letters are arranged on.
+#[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Layout {
+    #[default]
+    Qwerty,
+    Dvorak,
+    /// No layout at all: labels are handed out a to z in reading order,
+    /// which is the one thing that holds whatever keyboard you type on.
+    None,
 }
 
 impl Default for Keys {
@@ -81,6 +99,8 @@ impl Default for Keys {
             left_click: "minus".into(),
             right_click: "equal".into(),
             reset: String::new(),
+            layout: Layout::default(),
+            excluded: String::new(),
         }
     }
 }
@@ -102,8 +122,9 @@ impl Keys {
         Some(key_name(&self.reset)).filter(|k| !k.is_empty())
     }
 
-    /// The letters the click keys have taken, which no label may use.
-    pub fn reserved_letters(&self) -> Vec<char> {
+    /// The letters the click keys and the reset key have taken. They are
+    /// still bound while the overlay is up, as those keys.
+    pub fn taken_letters(&self) -> Vec<char> {
         [Some(self.left()), Some(self.right()), self.reset()]
             .into_iter()
             .flatten()
@@ -115,6 +136,21 @@ impl Keys {
                 }
             })
             .collect()
+    }
+
+    /// Every letter a label may not use: the ones another key has taken, and
+    /// the ones asked to be left out.
+    pub fn reserved_letters(&self) -> Vec<char> {
+        let mut out = self.taken_letters();
+        out.extend(
+            self.excluded
+                .chars()
+                .filter(|c| c.is_ascii_alphabetic())
+                .map(|c| c.to_ascii_lowercase()),
+        );
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 }
 
@@ -325,6 +361,7 @@ mod tests {
         let c: Config =
             serde_yaml::from_str("keys:\n  left_click: f\n  right_click: semicolon\n").unwrap();
         assert_eq!(c.keys.reserved_letters(), vec!['f']);
+        assert_eq!(c.keys.taken_letters(), vec!['f']);
         assert!(Keys::default().reserved_letters().is_empty());
     }
 
@@ -335,6 +372,29 @@ mod tests {
         assert_eq!(c.keys.left(), "minus");
         assert_eq!(c.keys.right(), "equal");
         assert!(c.keys.reserved_letters().is_empty());
+    }
+
+    #[test]
+    fn excluded_letters_join_the_reserved_ones() {
+        let c: Config =
+            serde_yaml::from_str("keys:\n  left_click: f\n  excluded: TYUghvbn\n").unwrap();
+        assert_eq!(
+            c.keys.reserved_letters(),
+            vec!['b', 'f', 'g', 'h', 'n', 't', 'u', 'v', 'y']
+        );
+        // Excluded keys are still bound while the overlay is up, so they do
+        // nothing rather than reaching the window underneath.
+        assert_eq!(c.keys.taken_letters(), vec!['f']);
+    }
+
+    #[test]
+    fn a_layout_is_named_in_lower_case() {
+        let c: Config = serde_yaml::from_str("keys:\n  layout: dvorak\n").unwrap();
+        assert_eq!(c.keys.layout, Layout::Dvorak);
+        let c: Config = serde_yaml::from_str("keys:\n  layout: none\n").unwrap();
+        assert_eq!(c.keys.layout, Layout::None);
+        assert_eq!(Keys::default().layout, Layout::Qwerty);
+        assert!(serde_yaml::from_str::<Config>("keys:\n  layout: azerty\n").is_err());
     }
 
     #[test]

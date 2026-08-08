@@ -135,12 +135,25 @@ overlay instead.
 ### Hint mode
 
 Every clickable element gets an amber label (`src/hint.rs`). The first
-key is where the element is: the qwerty block is laid over the window
-the way the grid is, and an element takes the key covering it, never a
-neighbour's. An element in the bottom-left corner is labelled Z and one
-in the top-right P, however the elements happen to be spread, so a
-window whose targets crowd into one strip keeps them on the keys under
-that strip instead of fanning them across the keyboard.
+key is where the element is: the three letter rows of your keyboard are
+laid over the window the way the grid is, and an element takes the key
+covering it, never a neighbour's. On qwerty an element in the
+bottom-left corner is labelled Z and one in the top-right P, however the
+elements happen to be spread, so a window whose targets crowd into one
+strip keeps them on the keys under that strip instead of fanning them
+across the keyboard.
+
+`keys.layout` says which keyboard that is: `qwerty` or `dvorak`, or
+`none` for a keyboard the tool does not know. With `none` there is no
+arrangement to follow, so labels are handed out a to z in reading order
+instead, which is the one thing that holds whatever you type on.
+
+`keys.excluded` drops letters from the labels: keys that are awkward to
+reach are worse than a longer hint. An excluded key still holds its
+place on the block, so what sits under it moves to the nearest key with
+room rather than shifting everything along, and it is still bound while
+the overlay is up, so pressing it does nothing instead of typing into
+the window underneath.
 
 A key covering one element is the whole label. A key covering several
 becomes their prefix, and those elements take a second key handed out
@@ -163,11 +176,17 @@ dense corner of a window into a mess of boxes.
 
 ### Grid mode
 
-The window is divided into three rows following the qwerty layout
-(`src/grid.rs`): ten tiles for q-p, nine for a-l, seven for z-m. A
-letter arms that tile and the same letter again clicks its center, the
-same two presses as a one-key hint. Space switches back to hint mode
-when elements exist.
+The window is divided into three rows following the same layout
+(`src/grid.rs`): on qwerty, ten tiles for q-p, nine for a-l, seven for
+z-m. A letter arms that tile and the same letter again clicks its
+center, the same two presses as a one-key hint. Space switches back to
+hint mode when elements exist.
+
+Excluded and taken letters are dropped from their row here, and the
+letters left spread out to fill it. The grid is what a window with no
+accessibility tree gets, and a grid with holes in it cannot reach part
+of that window at all, which matters more than the letters keeping
+their exact place.
 
 ## Element discovery (AT-SPI)
 

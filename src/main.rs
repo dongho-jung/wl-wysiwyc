@@ -142,7 +142,8 @@ fn elements(n: Option<usize>) -> Result<(), Box<dyn Error>> {
         .map(|e| (e.x + e.w / 2.0, e.y + e.h / 2.0))
         .collect();
     let reserved = config::get().keys.reserved_letters();
-    let labels = hint::labels(&centers, w.w as f64, w.h as f64, &reserved);
+    let layout = config::get().keys.layout;
+    let labels = hint::labels(&centers, w.w as f64, w.h as f64, &reserved, layout);
     println!(
         "{} clickable elements (window-relative logical):",
         els.len()

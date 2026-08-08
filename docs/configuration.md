@@ -31,6 +31,17 @@ keys:
   left_click: minus
   right_click: equal
 
+  # The keyboard the labels are laid out on, so that where something is
+  # on screen decides which key names it: qwerty, dvorak, or none. With
+  # none there is no arrangement to follow and labels are handed out a
+  # to z in reading order instead.
+  layout: qwerty
+
+  # Letters to keep out of hints and the grid, run together. For the
+  # keys you would rather not reach for: excluded: tyughvbn leaves the
+  # eighteen that stay under a hand.
+  excluded: ""
+
   # An extra key that puts the overlay back to how it opened, and closes
   # it when there is nothing left to undo. Worth setting to whatever key
   # opens the overlay: while the overlay is up that key belongs to the
@@ -76,6 +87,13 @@ elements:
 - A click key does not have to be one of the two defaults. Any key xkb
   can name works, and if it is a letter the hints and the grid make room
   by leaving that letter out. The same goes for `reset`.
+- Excluding letters costs capacity, not correctness: fewer keys means
+  more windows need two-key hints, and a window with more targets than
+  the keys left can name will use three. Eighteen letters still name
+  324 targets in two keys, which is more than the element limit below.
+- In the grid, an excluded letter's tile is not left empty; its row
+  spreads out to fill the width, so every part of the window stays
+  reachable.
 - Labels are slightly transparent on purpose, so a small icon under one
   is still recognisable. End `hint` with `ff` for solid labels.
 - Raising `elements.walk_ms` gets more of a heavy page hinted at the

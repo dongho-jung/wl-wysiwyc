@@ -935,6 +935,7 @@ fn hints_for(w: &crate::hypr::Window, els: &[Element]) -> Vec<Hint> {
             w.w as f64,
             w.h as f64,
             &config::get().keys.reserved_letters(),
+            config::get().keys.layout,
         ))
         .map(|((e, &(cx, cy)), label)| Hint {
             label,

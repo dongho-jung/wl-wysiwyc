@@ -18,8 +18,10 @@ Keys: the overlay opens with the target on whatever the pointer is
 nearest, the arrow keys move it, and typing a hint sends it there. `-`
 clicks the target, `=` right-clicks it, and `Shift`+`-` double-clicks
 it. A hint's keys are where its target is: the keyboard is laid over the
-window, so something in the bottom-left corner is labelled `z` and
-something in the top-right `p`. `Space` switches between hints and the
+window, so on qwerty something in the bottom-left corner is labelled `z`
+and something in the top-right `p`. Set `keys.layout` for dvorak, or for
+no layout at all, and `keys.excluded` to keep letters you would rather
+not reach for out of the labels. `Space` switches between hints and the
 letter grid, `Tab` picks another window with `1`-`9`, `Backspace` undoes
 one press, and `Esc` backs out and then quits. Set `keys.reset` to the
 key that opens the overlay: pressing it starts the choices over, and
