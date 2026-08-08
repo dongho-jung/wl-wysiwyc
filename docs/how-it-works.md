@@ -177,19 +177,23 @@ when elements exist.
    window's pid from Hyprland.
 3. Pick the frame whose accessible name equals the window title (falls
    back to the first frame).
-4. Breadth-first walk: prune subtrees whose root lacks the SHOWING
-   state, collect nodes whose role is interactive (button, link, entry,
-   check box, combo box, menu item, tab, slider, list item, and so on)
-   and SENSITIVE, and read their extents in window coordinates.
-   Budgets: 4000 nodes, 400 elements, 1.2 s. Running out of budget is
-   reported on stderr, because the walk is breadth-first and a heavy
-   page then keeps its chrome and loses part of its content.
-5. Viewport: a node whose rectangle sits wholly outside the window is
-   skipped along with everything inside it. A long page has far more of
-   those than it has visible ones, and walking them is what spends the
-   budget before the walk reaches the part of the page on screen. The
-   cost is a child pinned on screen inside a container scrolled off it,
-   rare enough to trade for a walk three times as fast.
+4. Breadth-first walk: collect nodes that are SHOWING and SENSITIVE and
+   whose role is interactive (button, link, entry, check box, combo box,
+   menu item, tab, slider, list item, and so on), reading their extents
+   in window coordinates. Budgets: 4000 nodes, 400 elements, 1.2 s.
+   Running out of budget is reported on stderr, because the walk is
+   breadth-first and a heavy page then keeps its chrome and loses part
+   of its content.
+5. Viewport: a node whose rectangle sits wholly outside the window, or
+   which is not SHOWING, goes to the back of the walk along with
+   everything inside it. A long page has far more of those than it has
+   visible ones, and walking them first is what spends the budget
+   before the walk reaches the part of the page on screen. It is an
+   order and not a prune because Chromium gives a scroll container the
+   extents of its whole contents: on a scrolled page every ancestor of
+   what you can see reports a rectangle nowhere near the window, and
+   half of them are not SHOWING either, while the rows inside them are
+   placed correctly.
 6. Pruning: trees nest a link inside a list row inside a cell, all with
    near-identical extents, and one hint per level buries the window in
    labels. A row or tree item that wraps another clickable element
@@ -203,7 +207,8 @@ when elements exist.
    descendant.
 
 Measured on this setup: a small page yields 17 elements in about 0.1 s,
-the GeekNews front page 57 elements in about 0.1 s.
+the GeekNews front page 57 elements in about 0.1 s, and a scrolled
+Portainer service page 101 elements in about 0.7 s.
 
 ## System setup required for hints
 

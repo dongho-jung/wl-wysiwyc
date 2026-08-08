@@ -44,6 +44,10 @@ const STATE_SHOWING: u64 = 25;
 
 const MAX_NODES: usize = 4000;
 
+/// A node waiting to be walked: where it lives, the pixel ratio inherited
+/// from its document, and the parent that ratio was measured against.
+type Pending = (String, String, f64, Option<String>);
+
 /// A clickable element, window-relative logical coordinates.
 #[derive(Debug, Clone)]
 pub struct Element {
@@ -241,17 +245,22 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
 
     let cfg = &crate::config::get().elements;
     let deadline = Instant::now() + Duration::from_millis(cfg.walk_ms);
-    let mut queue: VecDeque<(String, String, f64, Option<String>)> = VecDeque::new();
+    // Nodes to walk: the ones inside the window first, everything else after.
+    let mut queue: VecDeque<Pending> = VecDeque::new();
+    let mut later: VecDeque<Pending> = VecDeque::new();
     queue.push_back((frame.0.clone(), frame.1.to_string(), 1.0, None));
     let mut visited = 0usize;
     let mut seen_rects = HashSet::new();
     let mut out = Vec::new();
 
-    while let Some((node_dest, path, ratio, parent_path)) = queue.pop_front() {
+    while let Some((node_dest, path, ratio, parent_path)) =
+        queue.pop_front().or_else(|| later.pop_front())
+    {
         if visited >= MAX_NODES || out.len() >= cfg.max || Instant::now() > deadline {
-            // The walk is breadth-first, so running out of budget drops the
-            // deepest nodes: a heavy page keeps its chrome and loses part of
-            // its content. Say so instead of silently hinting a subset.
+            // Running out of budget drops whatever the walk had not reached:
+            // the deepest nodes, and the off-window ones held back below. A
+            // heavy page keeps its chrome and loses part of its content, so
+            // say so instead of silently hinting a subset.
             eprintln!(
                 "atspi: walk stopped early after {visited} nodes, {} elements",
                 out.len()
@@ -268,9 +277,6 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
         };
         let st = state_of(&conn, &node_dest, &path);
         let showing = st & (1 << STATE_SHOWING) != 0;
-        if !showing && visited > 1 {
-            continue;
-        }
 
         // A node's own rectangle, once Chromium's pixel ratio is divided out.
         let rect = extents_of(&conn, &node_dest, &path).map(|(x, y, w, h)| {
@@ -285,17 +291,18 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
             ex + ew > 0.0 && ey + eh > 0.0 && ex < frame_w && ey < frame_h
         };
 
-        // A container scrolled off the window cannot have anything visible
-        // inside it, and a long page has far more of those than it has
-        // visible ones. Walking them anyway is what spends the budget before
-        // the walk reaches the part of the page you are looking at.
-        if let Some(r) = rect {
-            if r.2 > 0.0 && r.3 > 0.0 && !on_screen(r) {
-                continue;
-            }
-        }
+        // Whether this node's own box is worth walking into first. A container
+        // that sits off the window usually has nothing visible inside it, and
+        // a long page has far more of those than visible ones. Chromium is the
+        // exception that stops this being a prune: it gives a scroll container
+        // the box of its whole contents, which for a scrolled page is nowhere
+        // near the window, while the visible rows inside it are placed
+        // correctly. So off-window subtrees go to the back of the walk instead
+        // of being dropped, and a page that has hidden a widget in a corner
+        // still gets hinted once the visible part is done.
+        let promising = showing && rect.is_none_or(|r| r.2 <= 0.0 || r.3 <= 0.0 || on_screen(r));
 
-        if CLICKABLE_ROLES.contains(&role) && st & (1 << STATE_SENSITIVE) != 0 {
+        if showing && CLICKABLE_ROLES.contains(&role) && st & (1 << STATE_SENSITIVE) != 0 {
             if let Some((ex, ey, ew, eh)) = rect {
                 if ew >= 3.0 && eh >= 3.0 && on_screen((ex, ey, ew, eh)) {
                     let key = (ex as i32, ey as i32, ew as i32, eh as i32, role);
@@ -330,8 +337,9 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
             }
         }
 
+        let next = if promising { &mut queue } else { &mut later };
         for (cd, cp) in children(&conn, &node_dest, &path) {
-            queue.push_back((cd, cp.to_string(), child_ratio, Some(path.clone())));
+            next.push_back((cd, cp.to_string(), child_ratio, Some(path.clone())));
         }
     }
 
