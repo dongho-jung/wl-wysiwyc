@@ -21,9 +21,15 @@ and the bounding box of the whole output layout.
 `src/overlay.rs` connects to the compositor with smithay-client-toolkit
 and creates one wlr-layer-shell surface on the overlay layer, anchored
 to all edges of the focused output, with exclusive keyboard
-interactivity. Rendering is plain software drawing into a shared-memory
-Argb8888 buffer (`src/draw.rs`): premultiplied alpha and glyphs
-rasterized with fontdue. Every shape is a rounded rectangle measured by
+interactivity and an empty input region. Taking no pointer input
+matters: a surface that accepts it pulls the pointer off the window
+underneath, which sees the pointer leave, and a panel held open by
+hover folds up as the overlay opens. Keyboard focus comes from the
+layer's interactivity, so nothing is lost by giving pointer input up.
+
+Rendering is plain software drawing into a shared-memory Argb8888
+buffer (`src/draw.rs`): premultiplied alpha and glyphs rasterized with
+fontdue. Every shape is a rounded rectangle measured by
 its signed distance, which is what gives the labels smooth corners,
 outlines of any width, and shadows, all from the same few lines. The
 font comes from `fc-match sans:bold` with fallbacks to common system

@@ -29,7 +29,9 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 use wayland_client::{
     globals::{registry_queue_init, GlobalListContents},
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_surface},
+    protocol::{
+        wl_keyboard, wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm, wl_surface,
+    },
     Connection, Dispatch, QueueHandle,
 };
 use wayland_protocols_wlr::virtual_pointer::v1::client::{
@@ -198,6 +200,15 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
     let output = app.find_output();
 
     let surface = compositor.create_surface(&qh);
+    // Take no pointer input at all. A surface that accepts it pulls the
+    // pointer off whatever is underneath, and the window sees the pointer
+    // leave: menus that hang on hover fold up as the overlay opens, and the
+    // hints then describe a window that is no longer there. Keyboard focus
+    // comes from the layer's interactivity, not from this, so nothing is
+    // lost by giving it up.
+    let empty = compositor.wl_compositor().create_region(&qh, ());
+    surface.set_input_region(Some(&empty));
+    empty.destroy();
     let layer = layer_shell.create_layer_surface(
         &qh,
         surface,
@@ -1110,5 +1121,6 @@ delegate_seat!(App);
 delegate_keyboard!(App);
 delegate_layer!(App);
 delegate_registry!(App);
+wayland_client::delegate_noop!(App: ignore wl_region::WlRegion);
 wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerManagerV1);
 wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerV1);
