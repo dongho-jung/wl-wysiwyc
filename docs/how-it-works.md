@@ -81,7 +81,9 @@ switches back to hint mode when elements exist.
    state, collect nodes whose role is interactive (button, link, entry,
    check box, combo box, menu item, tab, slider, list item, and so on)
    and SENSITIVE, and read their extents in window coordinates.
-   Budgets: 4000 nodes, 400 elements, 1.2 s.
+   Budgets: 4000 nodes, 400 elements, 1.2 s. Running out of budget is
+   reported on stderr, because the walk is breadth-first and a heavy
+   page then keeps its chrome and loses part of its content.
 5. Pruning: trees nest a link inside a list row inside a cell, all with
    near-identical extents, and one hint per level buries the window in
    labels. A row or tree item that wraps another clickable element
@@ -145,6 +147,10 @@ extent, then a left button press and release.
   (scratchpad) workspaces and pinned windows are not handled.
 - Hint clicks target the element center; elements overlapped by
   something else (sticky headers, popovers) can be misclicked.
+- Heavy pages outrun the 1.2 s walk budget, which leaves their content
+  partly unhinted (the grid still covers it). The walk costs three
+  D-Bus round trips per node; `org.a11y.atspi.Cache.GetItems` would
+  fetch roles, states, and the tree shape in one call instead.
 - Left click only, and the cursor stays where the click happened.
 - Monitors left of or above the origin (negative layout coordinates)
   are not supported.

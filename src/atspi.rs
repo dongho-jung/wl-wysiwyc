@@ -250,6 +250,13 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
 
     while let Some((node_dest, path, ratio, parent_path)) = queue.pop_front() {
         if visited >= MAX_NODES || out.len() >= MAX_ELEMENTS || Instant::now() > deadline {
+            // The walk is breadth-first, so running out of budget drops the
+            // deepest nodes: a heavy page keeps its chrome and loses part of
+            // its content. Say so instead of silently hinting a subset.
+            eprintln!(
+                "atspi: walk stopped early after {visited} nodes, {} elements",
+                out.len()
+            );
             break;
         }
         if path == NULL_PATH {
