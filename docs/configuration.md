@@ -68,6 +68,8 @@ elements:
 - A click key does not have to be one of the two defaults. Any key xkb
   can name works, and if it is a letter the hints and the grid make room
   by leaving that letter out.
+- Labels are slightly transparent on purpose, so a small icon under one
+  is still recognisable. End `hint` with `ff` for solid labels.
 - Raising `elements.walk_ms` gets more of a heavy page hinted at the
   cost of a longer pause before the overlay appears. See the limitation
   in [how-it-works.md](how-it-works.md) for why the walk is slow.

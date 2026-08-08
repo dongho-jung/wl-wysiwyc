@@ -858,15 +858,27 @@ impl LabelBox {
             && self.y - gap < o.y + o.h
             && o.y - gap < self.y + self.h
     }
+
+    /// How much of this label lands on a rectangle, in pixels.
+    fn covers(&self, (x, y, w, h): (i32, i32, i32, i32)) -> i64 {
+        let ox = (self.x + self.w).min(x + w) - self.x.max(x);
+        let oy = (self.y + self.h).min(y + h) - self.y.max(y);
+        if ox <= 0 || oy <= 0 {
+            0
+        } else {
+            ox as i64 * oy as i64
+        }
+    }
 }
 
 /// Lay out one box per hint.
 ///
 /// A label large enough to swallow its target goes beside it instead of over
-/// it: a rail of small icons is unusable when every icon is under a label.
-/// Bigger elements keep the vimium placement, a corner of the element, which
-/// costs them nothing. Either way a box that would land on one already
-/// placed, or right up against it, tries the element's other sides first.
+/// it: a row of small icons is unusable when every icon is under a label.
+/// Beside is not enough on its own though, since the icon next door is just
+/// as worth seeing, so of the places that clear the labels already put down,
+/// the one covering the least of everything else wins. Bigger elements keep
+/// the vimium placement, a corner of the element, which costs them nothing.
 /// Placement covers every hint, not just the visible ones, so labels stay put
 /// while a prefix is typed.
 fn place_labels(
@@ -876,16 +888,23 @@ fn place_labels(
     canvas: (i32, i32),
     scale: i32,
 ) -> Vec<LabelBox> {
-    let px = config::get().label.size * scale as f32;
-    let pad_x = (config::get().label.pad_x * scale as f32) as i32;
-    let pad_y = (config::get().label.pad_y * scale as f32) as i32;
-    let gap = (config::get().label.gap * scale as f32) as i32;
+    let cfg = &config::get().label;
+    let px = cfg.size * scale as f32;
+    let pad_x = (cfg.pad_x * scale as f32) as i32;
+    let pad_y = (cfg.pad_y * scale as f32) as i32;
+    let gap = (cfg.gap * scale as f32) as i32;
+    let rect_of = |h: &Hint| {
+        (
+            ((h.rx - mon.0 as f64) * scale as f64) as i32,
+            ((h.ry - mon.1 as f64) * scale as f64) as i32,
+            (h.rw * scale as f64) as i32,
+            (h.rh * scale as f64) as i32,
+        )
+    };
+    let elements: Vec<(i32, i32, i32, i32)> = hints.iter().map(rect_of).collect();
     let mut taken: Vec<LabelBox> = Vec::with_capacity(hints.len());
     for h in hints {
-        let ex = ((h.rx - mon.0 as f64) * scale as f64) as i32;
-        let ey = ((h.ry - mon.1 as f64) * scale as f64) as i32;
-        let ew = (h.rw * scale as f64) as i32;
-        let eh = (h.rh * scale as f64) as i32;
+        let (ex, ey, ew, eh) = rect_of(h);
         let bh = px as i32 + 2 * pad_y;
         // A one-key label keeps its box square rather than turning into a
         // sliver.
@@ -893,7 +912,8 @@ fn place_labels(
             + 2 * pad_x)
             .max(bh);
         let (mid_x, mid_y) = (ex + (ew - bw) / 2, ey + (eh - bh) / 2);
-        let spots = if ew < 2 * bw || eh < 2 * bh {
+        let small = ew < 2 * bw || eh < 2 * bh;
+        let spots = if small {
             // Small target: everything here clears it.
             [
                 (ex + ew + gap, mid_y),
@@ -919,12 +939,23 @@ fn place_labels(
             w: bw,
             h: bh,
         };
-        let chosen = spots
-            .into_iter()
-            .map(fit)
-            .find(|b| !taken.iter().any(|t| t.crowds(b, gap)))
-            .unwrap_or_else(|| fit(spots[0]));
-        taken.push(chosen);
+        // Anything on top of a label already placed is out; among the rest,
+        // take whichever hides the least of the window.
+        let mut best: Option<(i64, LabelBox)> = None;
+        for spot in spots {
+            let b = fit(spot);
+            if taken.iter().any(|t| t.crowds(&b, gap)) {
+                continue;
+            }
+            let hidden: i64 = elements.iter().map(|&e| b.covers(e)).sum();
+            if best.as_ref().is_none_or(|(worst, _)| hidden < *worst) {
+                best = Some((hidden, b));
+            }
+            if hidden == 0 {
+                break;
+            }
+        }
+        taken.push(best.map(|(_, b)| b).unwrap_or_else(|| fit(spots[0])));
     }
     taken
 }

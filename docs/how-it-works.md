@@ -129,9 +129,11 @@ start of another one.
 Each key narrows the visible hints. Labels sit at the top-left corner of
 their element, vimium style, unless the element is small enough for the
 label to swallow it, in which case the label goes beside it: a row of
-icons is unusable when every icon is under a label. Either way, a label
-that would land on one already placed, or right up against it, tries the
-element's other sides first. Only the element
+icons is unusable when every icon is under a label. Beside is not enough
+on its own, since the icon next door is worth seeing too, so of the
+places that clear the labels already put down, the one covering the
+least of everything else wins. Labels are also a little transparent, so
+whatever a label does end up on is still recognisable. Only the element
 about to be clicked is outlined, since ringing every candidate turns a
 dense corner of a window into a mess of boxes.
 

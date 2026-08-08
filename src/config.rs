@@ -185,9 +185,9 @@ impl Default for Colors {
         Colors {
             dim: Hex(Color::new(0.0, 0.0, 0.0, 0.28)),
             shadow: Hex(Color::new(0.0, 0.0, 0.0, 0.42)),
-            hint: Hex(Color::new(0.98, 0.79, 0.29, 0.97)),
+            hint: Hex(Color::new(0.98, 0.79, 0.29, 0.88)),
             hint_text: Hex(Color::new(0.14, 0.09, 0.0, 1.0)),
-            armed: Hex(Color::new(0.24, 0.85, 0.60, 0.98)),
+            armed: Hex(Color::new(0.24, 0.85, 0.60, 0.92)),
             armed_text: Hex(Color::new(0.0, 0.14, 0.08, 1.0)),
             armed_key: Hex(Color::new(0.02, 0.24, 0.15, 0.92)),
             armed_key_text: Hex(Color::new(0.55, 1.0, 0.82, 1.0)),
