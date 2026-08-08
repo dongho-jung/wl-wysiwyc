@@ -8,7 +8,6 @@ use crate::draw::Color;
 use serde::{Deserialize, Deserializer};
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::time::Duration;
 
 static CONFIG: OnceLock<Config> = OnceLock::new();
 
@@ -43,36 +42,88 @@ fn load() -> Config {
 #[derive(Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// How long an armed key waits before confirming itself, in
-    /// milliseconds. Zero means it never does, so every key needs its second
-    /// press.
-    pub confirm_ms: ConfirmMs,
+    pub keys: Keys,
     pub label: Label,
     pub colors: Colors,
     pub elements: Elements,
 }
 
-impl Config {
-    pub fn confirm_delay(&self) -> Option<Duration> {
-        match self.confirm_ms.0 {
-            0 => None,
-            ms => Some(Duration::from_millis(ms)),
+/// What the keys do.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Keys {
+    /// Ask for every key twice: the first press shows what it would select,
+    /// the second takes it. Off by default, so one press is one key.
+    pub confirm: bool,
+    /// Click as soon as a hint is complete. Off by default: a complete hint
+    /// puts the pointer on its target and waits, which leaves room to look
+    /// before clicking and to pick which button.
+    pub instant: bool,
+    /// The keys that click. Either an xkb key name (`minus`, `return`,
+    /// `space`) or the character itself, which is translated to the name the
+    /// compositor wants. A letter here is kept out of the hints and the grid
+    /// so it cannot mean two things at once.
+    pub left_click: String,
+    pub right_click: String,
+}
+
+impl Default for Keys {
+    fn default() -> Self {
+        Keys {
+            confirm: false,
+            instant: false,
+            left_click: "minus".into(),
+            right_click: "equal".into(),
         }
     }
 }
 
-pub struct ConfirmMs(pub u64);
+impl Keys {
+    /// The name the compositor knows a click key by. Punctuation is easier to
+    /// write as itself than as `minus`, and in YAML a bare `-` means
+    /// something else entirely, so both spellings are accepted.
+    pub fn left(&self) -> String {
+        key_name(&self.left_click)
+    }
 
-impl Default for ConfirmMs {
-    fn default() -> Self {
-        ConfirmMs(300)
+    pub fn right(&self) -> String {
+        key_name(&self.right_click)
+    }
+
+    /// The letters the click keys have taken, which no label may use.
+    pub fn reserved_letters(&self) -> Vec<char> {
+        [self.left(), self.right()]
+            .into_iter()
+            .filter_map(|k| {
+                let mut cs = k.chars();
+                match (cs.next(), cs.next()) {
+                    (Some(c), None) if c.is_ascii_alphabetic() => Some(c.to_ascii_lowercase()),
+                    _ => None,
+                }
+            })
+            .collect()
     }
 }
 
-impl<'de> Deserialize<'de> for ConfirmMs {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        u64::deserialize(d).map(ConfirmMs)
-    }
+/// The xkb name for a key written as itself. Letters and digits are already
+/// their own names; punctuation is not.
+fn key_name(key: &str) -> String {
+    let named = match key {
+        "-" => "minus",
+        "=" => "equal",
+        ";" => "semicolon",
+        "'" => "apostrophe",
+        "," => "comma",
+        "." => "period",
+        "/" => "slash",
+        "\\" => "backslash",
+        "[" => "bracketleft",
+        "]" => "bracketright",
+        "`" => "grave",
+        " " => "space",
+        other => other,
+    };
+    named.to_string()
 }
 
 /// Label geometry, in unscaled pixels. Everything here is multiplied by the
@@ -233,7 +284,10 @@ mod tests {
     #[test]
     fn an_empty_file_is_all_defaults() {
         let c: Config = serde_yaml::from_str("{}").unwrap();
-        assert_eq!(c.confirm_ms.0, 300);
+        assert!(!c.keys.confirm);
+        assert!(!c.keys.instant);
+        assert_eq!(c.keys.left(), "minus");
+        assert_eq!(c.keys.right(), "equal");
         assert_eq!(c.label.size, 11.5);
         assert_eq!(c.elements.max, 400);
     }
@@ -241,14 +295,32 @@ mod tests {
     #[test]
     fn a_partial_file_keeps_the_rest() {
         let c: Config = serde_yaml::from_str(
-            "confirm_ms: 0\nlabel:\n  size: 20\ncolors:\n  hint: \"#123456\"\n",
+            "keys:\n  confirm: true\nlabel:\n  size: 20\ncolors:\n  hint: \"#123456\"\n",
         )
         .unwrap();
-        assert!(c.confirm_delay().is_none());
+        assert!(c.keys.confirm);
+        assert_eq!(c.keys.right(), "equal");
         assert_eq!(c.label.size, 20.0);
         assert_eq!(c.label.pad_x, 4.5);
         assert!((c.colors.hint.r - 0.07).abs() < 0.01);
         assert_eq!(c.colors.armed_text.a, 1.0);
+    }
+
+    #[test]
+    fn a_click_key_that_is_a_letter_is_reserved() {
+        let c: Config =
+            serde_yaml::from_str("keys:\n  left_click: f\n  right_click: semicolon\n").unwrap();
+        assert_eq!(c.keys.reserved_letters(), vec!['f']);
+        assert!(Keys::default().reserved_letters().is_empty());
+    }
+
+    #[test]
+    fn punctuation_is_named_either_way() {
+        let c: Config =
+            serde_yaml::from_str("keys:\n  left_click: \"-\"\n  right_click: equal\n").unwrap();
+        assert_eq!(c.keys.left(), "minus");
+        assert_eq!(c.keys.right(), "equal");
+        assert!(c.keys.reserved_letters().is_empty());
     }
 
     #[test]

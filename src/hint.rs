@@ -45,14 +45,18 @@ const PER_KEY: usize = 26;
 /// between a third key on every one of them and a short hop to a neighbour.
 /// The hop wins: it keeps every label two keys long and only the overflow
 /// moves, to the key nearest the element it is leaving.
-fn relieve_crowding(norm: &[(f64, f64)], cells: &mut [Vec<usize>]) {
+fn relieve_crowding(norm: &[(f64, f64)], cells: &mut [Vec<usize>], room: &[usize]) {
     loop {
-        let Some(from) = cells.iter().position(|c| c.len() > PER_KEY) else {
+        let Some(from) = cells
+            .iter()
+            .enumerate()
+            .position(|(k, c)| c.len() > room[k])
+        else {
             return;
         };
         let (fx, fy) = key_pos(from);
         let Some(to) = (0..cells.len())
-            .filter(|&k| cells[k].len() < PER_KEY)
+            .filter(|&k| cells[k].len() < room[k])
             .min_by(|&a, &b| {
                 let d = |k: usize| {
                     let (x, y) = key_pos(k);
@@ -99,8 +103,13 @@ fn reading_order(centers: &[(f64, f64)], group: &[usize]) -> Vec<usize> {
 /// along the group in reading order. The first key already says where the
 /// group is, so the rest of the label uses the keyboard end to end instead of
 /// squeezing a column of elements into the three keys above each other.
-fn suffixes(centers: &[(f64, f64)], group: &[usize], prefix: &str, out: &mut [String]) {
-    let keys = keys();
+fn suffixes(
+    centers: &[(f64, f64)],
+    group: &[usize],
+    prefix: &str,
+    out: &mut [String],
+    keys: &[char],
+) {
     let order = reading_order(centers, group);
     if order.len() <= keys.len() {
         for (n, &i) in order.iter().enumerate() {
@@ -114,7 +123,7 @@ fn suffixes(centers: &[(f64, f64)], group: &[usize], prefix: &str, out: &mut [St
         let prefix = format!("{prefix}{}", keys[n]);
         match part {
             [i] => out[*i] = prefix,
-            _ => suffixes(centers, part, &prefix, out),
+            _ => suffixes(centers, part, &prefix, out, keys),
         }
     }
 }
@@ -128,25 +137,36 @@ fn suffixes(centers: &[(f64, f64)], group: &[usize], prefix: &str, out: &mut [St
 /// however the elements happen to be spread. A key covering one element is
 /// the whole label; a key covering several becomes their prefix. Labels are
 /// prefix-free, so a complete label is never the start of another one.
-pub fn labels(centers: &[(f64, f64)], w: f64, h: f64) -> Vec<String> {
+pub fn labels(centers: &[(f64, f64)], w: f64, h: f64, reserved: &[char]) -> Vec<String> {
     let mut out = vec![String::new(); centers.len()];
     let (w, h) = (w.max(1.0), h.max(1.0));
-    let keys = keys();
+    let all = keys();
+    // A key that means something else cannot also name a hint. Its cell holds
+    // nothing, so whatever sits under it moves to the keys around it.
+    let free: Vec<char> = all
+        .iter()
+        .copied()
+        .filter(|k| !reserved.contains(k))
+        .collect();
+    let room: Vec<usize> = all
+        .iter()
+        .map(|k| if reserved.contains(k) { 0 } else { PER_KEY })
+        .collect();
     let norm: Vec<(f64, f64)> = centers
         .iter()
         .map(|&(x, y)| ((x / w).clamp(0.0, 1.0), (y / h).clamp(0.0, 1.0)))
         .collect();
-    let mut cells: Vec<Vec<usize>> = vec![Vec::new(); keys.len()];
+    let mut cells: Vec<Vec<usize>> = vec![Vec::new(); all.len()];
     for (i, &(x, y)) in norm.iter().enumerate() {
         cells[key_at(x, y)].push(i);
     }
-    relieve_crowding(&norm, &mut cells);
+    relieve_crowding(&norm, &mut cells, &room);
     for (k, cell) in cells.iter().enumerate() {
-        let prefix = keys[k].to_string();
+        let prefix = all[k].to_string();
         match cell.as_slice() {
             [] => {}
             [i] => out[*i] = prefix,
-            _ => suffixes(centers, cell, &prefix, &mut out),
+            _ => suffixes(centers, cell, &prefix, &mut out, &free),
         }
     }
     out
@@ -187,7 +207,7 @@ mod tests {
     #[test]
     fn labels_are_unique_and_prefix_free() {
         for (cols, rows) in [(1, 1), (3, 2), (6, 4), (7, 4), (12, 9), (20, 20)] {
-            let ls = labels(&lattice(cols, rows), W, H);
+            let ls = labels(&lattice(cols, rows), W, H, &[]);
             assert_eq!(ls.len(), cols * rows);
             assert!(ls.iter().all(|l| !l.is_empty()));
             let set: HashSet<&String> = ls.iter().collect();
@@ -199,7 +219,7 @@ mod tests {
     #[test]
     fn the_first_key_is_the_one_covering_the_element() {
         let centers = lattice(11, 7);
-        let ls = labels(&centers, W, H);
+        let ls = labels(&centers, W, H, &[]);
         let keys = keys();
         for (&(x, y), label) in centers.iter().zip(&ls) {
             assert_eq!(
@@ -216,7 +236,7 @@ mod tests {
         let centers: Vec<(f64, f64)> = (0..40)
             .map(|i| (20.0, (i as f64 + 0.5) * H / 40.0))
             .collect();
-        let ls = labels(&centers, W, H);
+        let ls = labels(&centers, W, H, &[]);
         assert!(
             ls.iter().all(|l| "qaz".contains(first(l))),
             "left edge reached keys it does not sit under: {ls:?}"
@@ -228,7 +248,7 @@ mod tests {
 
     #[test]
     fn corners_land_on_the_matching_keys() {
-        let ls = labels(&lattice(10, 3), W, H);
+        let ls = labels(&lattice(10, 3), W, H, &[]);
         assert_eq!(ls[0], "q");
         assert_eq!(ls[9], "p");
         assert_eq!(first(ls.last().unwrap()), 'm');
@@ -236,19 +256,19 @@ mod tests {
 
     #[test]
     fn a_single_row_of_elements_uses_the_home_row() {
-        let ls = labels(&lattice(5, 1), W, H);
+        let ls = labels(&lattice(5, 1), W, H, &[]);
         assert_eq!(ls, ["a", "d", "g", "j", "l"]);
     }
 
     #[test]
     fn a_single_column_of_elements_walks_down_the_keyboard() {
-        let ls = labels(&lattice(1, 3), W, H);
+        let ls = labels(&lattice(1, 3), W, H, &[]);
         assert_eq!(ls, ["y", "g", "v"]);
     }
 
     #[test]
     fn one_key_per_element_where_the_window_is_sparse() {
-        let ls = labels(&lattice(7, 3), W, H);
+        let ls = labels(&lattice(7, 3), W, H, &[]);
         assert!(ls.iter().all(|l| l.len() == 1));
     }
 
@@ -260,7 +280,7 @@ mod tests {
         let centers: Vec<(f64, f64)> = (0..80)
             .map(|i| (20.0, (i as f64 + 0.5) * H / 80.0))
             .collect();
-        let ls = labels(&centers, W, H);
+        let ls = labels(&centers, W, H, &[]);
         assert!(
             ls.iter().all(|l| l.len() <= 2),
             "labels grew a third key: {ls:?}"
@@ -277,12 +297,25 @@ mod tests {
     fn a_crowded_cell_grows_a_second_key_in_reading_order() {
         // Five elements inside one cell, top-left of the window.
         let centers: Vec<(f64, f64)> = (0..5).map(|i| (10.0, 10.0 + i as f64 * 20.0)).collect();
-        let ls = labels(&centers, W, H);
+        let ls = labels(&centers, W, H, &[]);
         assert_eq!(ls, ["qq", "qw", "qe", "qr", "qt"]);
     }
 
     #[test]
+    fn a_reserved_key_names_nothing() {
+        // 'a' clicks, so no label may start with it and the elements that sit
+        // under it move to the keys beside it.
+        let ls = labels(&lattice(9, 3), W, H, &['a']);
+        assert!(
+            ls.iter().all(|l| !l.contains('a')),
+            "a reserved key turned up in a label: {ls:?}"
+        );
+        assert_eq!(ls.len(), 27);
+        assert!(prefix_free(&ls));
+    }
+
+    #[test]
     fn no_elements_no_labels() {
-        assert!(labels(&[], W, H).is_empty());
+        assert!(labels(&[], W, H, &[]).is_empty());
     }
 }

@@ -11,14 +11,20 @@ pub struct Tile {
 
 /// Tiles covering a w x h rectangle, positions relative to its origin.
 /// Three rows following the qwerty layout; each row splits the width
-/// evenly among its letters.
+/// evenly among its letters. A letter that means something else elsewhere
+/// keeps its place in the layout but gets no tile, so the geometry of the
+/// remaining ones does not shift.
 pub fn tiles(w: f64, h: f64) -> Vec<Tile> {
+    let reserved = crate::config::get().keys.reserved_letters();
     let row_h = h / ROWS.len() as f64;
     let mut out = Vec::with_capacity(26);
     for (ri, row) in ROWS.iter().enumerate() {
         let cols = row.chars().count();
         let tile_w = w / cols as f64;
         for (ci, ch) in row.chars().enumerate() {
+            if reserved.contains(&ch) {
+                continue;
+            }
             out.push(Tile {
                 ch,
                 x: ci as f64 * tile_w,

@@ -32,10 +32,8 @@ use smithay_client_toolkit::{
 };
 use std::collections::HashMap;
 use std::error::Error;
-use std::io::ErrorKind;
 use std::time::{Duration, Instant};
 use wayland_client::{
-    backend::WaylandError,
     globals::{registry_queue_init, GlobalListContents},
     protocol::{
         wl_keyboard, wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm, wl_surface,
@@ -48,6 +46,7 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
 };
 
 const BTN_LEFT: u32 = 0x110;
+const BTN_RIGHT: u32 = 0x111;
 
 /// Colours the config does not name, because they are shades of ones it
 /// does: the darker edge of a label, the wash and glow around an armed
@@ -97,6 +96,13 @@ enum Stage {
     PickHint { win: usize },
 }
 
+/// What a complete hint or tile picked out.
+#[derive(Clone, Copy, PartialEq)]
+enum Target {
+    Hint(usize),
+    Tile(char),
+}
+
 #[derive(Clone)]
 struct Hint {
     label: String,
@@ -126,15 +132,20 @@ struct App {
     dirty: bool,
     stage: Stage,
     exit: bool,
+    /// Where to click on the way out, and with which button.
     target: Option<(f64, f64)>,
+    button: u32,
+    /// Where to send the pointer, once the loop can get to it.
+    aim: Option<(f64, f64)>,
     hints: Vec<Hint>,
     /// Keys already confirmed, narrowing the hints.
     typed: String,
-    /// A key pressed once and not confirmed yet: it previews what it would
-    /// select, and pressing it again commits it. It also commits on its own
-    /// shortly after, so the second press is a shortcut rather than a toll.
+    /// With `keys.confirm` on, a key pressed once and not taken yet: it shows
+    /// what it would select, and pressing it again takes it.
     armed: Option<char>,
-    armed_at: Option<Instant>,
+    /// The target a complete hint or tile picked out, waiting for a click
+    /// key. The pointer is already sitting on it.
+    picked: Option<(Target, (f64, f64))>,
     elements_cache: HashMap<usize, Vec<Element>>,
     pending_pick: Option<usize>,
 }
@@ -192,10 +203,12 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         stage,
         exit: false,
         target: None,
+        button: BTN_LEFT,
+        aim: None,
         hints: Vec::new(),
         typed: String::new(),
         armed: None,
-        armed_at: None,
+        picked: None,
         elements_cache: HashMap::new(),
         pending_pick,
     };
@@ -244,6 +257,13 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
     layer.commit();
     app.layer = Some(layer);
 
+    // One virtual pointer for the whole run: it sends the pointer to a picked
+    // target while the overlay is up, and clicks once it comes down.
+    let pointer = vp_manager.as_ref().map(|mgr| {
+        let seat = app.seat_state.seats().next();
+        mgr.create_virtual_pointer(seat.as_ref(), &qh, ())
+    });
+
     if let Some(smoke) = &smoke {
         let start = Instant::now();
         while start.elapsed() < smoke.duration {
@@ -263,26 +283,16 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             if !app.configured && start.elapsed() > Duration::from_secs(3) {
                 return Err("compositor never configured the overlay".into());
             }
-            // Wait for either the compositor or the armed key's own clock,
-            // whichever comes first.
-            queue.flush()?;
-            if let Some(guard) = queue.prepare_read() {
-                let wait = app.arm_deadline().unwrap_or(Duration::from_secs(1));
-                if readable(&conn, wait) {
-                    match guard.read() {
-                        // Woken with nothing to read: someone else drained
-                        // the socket, or the wakeup was spurious.
-                        Err(WaylandError::Io(e)) if e.kind() == ErrorKind::WouldBlock => {}
-                        other => {
-                            other?;
-                        }
-                    }
-                }
-            }
-            queue.dispatch_pending(&mut app)?;
+            queue.blocking_dispatch(&mut app)?;
             app.process_pending_pick();
-            app.expire_armed();
-            if app.configured && app.dirty {
+            // A picked target wants the pointer on it. Doing that here rather
+            // than where it was picked keeps the requests and their roundtrip
+            // out of the middle of an event callback.
+            if let (Some(at), Some(vp)) = (app.aim.take(), pointer.as_ref()) {
+                let extent = app.snap.layout_extent;
+                move_and_click(vp, at, extent, None, &mut queue, &mut app)?;
+            }
+            if !app.exit && app.configured && app.dirty {
                 app.draw();
             }
         }
@@ -296,31 +306,16 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
     queue.roundtrip(&mut app)?;
 
     if let Some(target) = app.target {
-        let mgr = vp_manager
+        let vp = pointer
             .as_ref()
             .ok_or("compositor does not expose zwlr_virtual_pointer_manager_v1")?;
-        let seat = app.seat_state.seats().next();
-        let vp = mgr.create_virtual_pointer(seat.as_ref(), &qh, ());
         let extent = app.snap.layout_extent;
-        move_and_click(&vp, target, extent, true, &mut queue, &mut app)?;
+        let button = app.button;
+        move_and_click(vp, target, extent, Some(button), &mut queue, &mut app)?;
         vp.destroy();
         queue.roundtrip(&mut app)?;
     }
     Ok(app.target)
-}
-
-/// Wait for the compositor to have something to say, or for the timeout to
-/// run out, whichever happens first.
-fn readable(conn: &Connection, timeout: Duration) -> bool {
-    use std::os::fd::{AsFd, AsRawFd};
-    let mut poll = libc::pollfd {
-        fd: conn.as_fd().as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-    // SAFETY: one initialized pollfd, and a length that matches it.
-    unsafe { libc::poll(&mut poll, 1, ms) > 0 }
 }
 
 /// Debug helper: move the cursor through the virtual pointer, no click.
@@ -348,14 +343,7 @@ pub fn move_only(snap: &Snapshot, target: (f64, f64)) -> Result<(), Box<dyn Erro
         .map_err(|_| "compositor does not expose zwlr_virtual_pointer_manager_v1")?;
     let vp = mgr.create_virtual_pointer(None, &qh, ());
     let mut mini = Mini;
-    move_and_click(
-        &vp,
-        target,
-        snap.layout_extent,
-        false,
-        &mut queue,
-        &mut mini,
-    )?;
+    move_and_click(&vp, target, snap.layout_extent, None, &mut queue, &mut mini)?;
     vp.destroy();
     queue.roundtrip(&mut mini)?;
     Ok(())
@@ -365,7 +353,7 @@ fn move_and_click<S>(
     vp: &ZwlrVirtualPointerV1,
     (gx, gy): (f64, f64),
     (ext_w, ext_h): (i32, i32),
-    click: bool,
+    button: Option<u32>,
     queue: &mut wayland_client::EventQueue<S>,
     state: &mut S,
 ) -> Result<(), Box<dyn Error>> {
@@ -374,11 +362,11 @@ fn move_and_click<S>(
     vp.motion_absolute(0, x, y, ext_w as u32, ext_h as u32);
     vp.frame();
     queue.roundtrip(state)?;
-    if click {
+    if let Some(button) = button {
         std::thread::sleep(Duration::from_millis(20));
-        vp.button(0, BTN_LEFT, wl_pointer::ButtonState::Pressed);
+        vp.button(0, button, wl_pointer::ButtonState::Pressed);
         vp.frame();
-        vp.button(0, BTN_LEFT, wl_pointer::ButtonState::Released);
+        vp.button(0, button, wl_pointer::ButtonState::Released);
         vp.frame();
         queue.roundtrip(state)?;
     }
@@ -401,10 +389,32 @@ impl App {
         let ch = match key {
             Key::Escape => return self.cancel(),
             Key::Backspace => return self.undo(),
-            Key::Enter => return self.commit_key(),
             Key::Tab => return self.pick_window(),
+            Key::LeftClick => return self.click_picked(BTN_LEFT),
+            Key::RightClick => return self.click_picked(BTN_RIGHT),
             Key::Char(ch) => ch.to_ascii_lowercase(),
         };
+        if ch == ' ' {
+            return self.switch_mode();
+        }
+        if config::get().keys.confirm {
+            // Every key is shown before it is taken: the first press arms it,
+            // the same key again takes it, and any other key aims elsewhere.
+            if self.armed == Some(ch) {
+                self.armed = None;
+                self.take(ch);
+            } else if self.leads_anywhere(ch) {
+                self.armed = Some(ch);
+                self.dirty = true;
+            }
+            return;
+        }
+        self.take(ch);
+    }
+
+    /// Act on a key, now that it is meant.
+    fn take(&mut self, ch: char) {
+        self.dirty = true;
         match self.stage {
             Stage::PickWindow => {
                 if let Some(d) = ch.to_digit(10) {
@@ -420,29 +430,81 @@ impl App {
                 }
             }
             Stage::PickTile { win } => {
-                if ch == ' ' {
-                    if !self.elements_cache.get(&win).is_none_or(Vec::is_empty) {
-                        self.enter_hint_stage(win);
-                    }
-                    return;
+                let w = &self.snap.windows[win];
+                if let Some(t) = grid::tile_for(w.w as f64, w.h as f64, ch) {
+                    let at = (w.x as f64 + t.x + t.w / 2.0, w.y as f64 + t.y + t.h / 2.0);
+                    self.pick(Target::Tile(ch), at);
                 }
-                self.press_tile(win, ch);
             }
-            Stage::PickHint { win } => {
-                if ch == ' ' {
-                    self.stage = Stage::PickTile { win };
-                    self.reset_input();
+            Stage::PickHint { .. } => {
+                if !self.leads_anywhere(ch) {
                     return;
                 }
-                self.press_hint(ch);
+                self.typed.push(ch);
+                let done = self
+                    .hints
+                    .iter()
+                    .position(|h| h.label == self.typed)
+                    .map(|i| (i, (self.hints[i].cx, self.hints[i].cy)));
+                if let Some((i, at)) = done {
+                    self.pick(Target::Hint(i), at);
+                }
             }
         }
     }
 
-    /// Esc unwinds one step at a time: drop the armed key, then everything
-    /// confirmed so far, then quit.
+    /// A hint or tile is complete. Either click it straight away, or put the
+    /// pointer on it and wait to be told which button, which is what makes
+    /// the overlay usable for a hover or a right click as well as a click.
+    fn pick(&mut self, what: Target, at: (f64, f64)) {
+        if config::get().keys.instant {
+            self.target = Some(at);
+            self.button = BTN_LEFT;
+            self.exit = true;
+            return;
+        }
+        // Typing is done with, so every hint comes back into view and another
+        // one can be picked without backing out first.
+        self.typed.clear();
+        self.armed = None;
+        self.picked = Some((what, at));
+        // The overlay takes no pointer input, so sending the pointer here
+        // lands it on the window underneath: whatever is under it lights up
+        // the way it would if the pointer had been dragged there.
+        self.aim = Some(at);
+        self.dirty = true;
+    }
+
+    /// Click whatever was picked, and leave.
+    fn click_picked(&mut self, button: u32) {
+        let Some((_, at)) = self.picked else {
+            return;
+        };
+        self.target = Some(at);
+        self.button = button;
+        self.exit = true;
+    }
+
+    /// Space swaps element hints for the letter grid and back.
+    fn switch_mode(&mut self) {
+        match self.stage {
+            Stage::PickTile { win } => {
+                if !self.elements_cache.get(&win).is_none_or(Vec::is_empty) {
+                    self.enter_hint_stage(win);
+                }
+            }
+            Stage::PickHint { win } => {
+                self.stage = Stage::PickTile { win };
+                self.reset_input();
+            }
+            Stage::PickWindow => {}
+        }
+    }
+
+    /// Esc unwinds one step at a time: the armed key, then what was picked,
+    /// then everything typed, then quit.
     fn cancel(&mut self) {
-        if self.disarm().is_some() {
+        if self.armed.take().is_some() || self.picked.take().is_some() {
             self.dirty = true;
             return;
         }
@@ -454,61 +516,19 @@ impl App {
         self.exit = true;
     }
 
-    /// Backspace undoes one key press: the armed key if there is one, the
-    /// last confirmed one otherwise.
+    /// Backspace undoes one key press.
     fn undo(&mut self) {
-        if self.disarm().is_some() || self.typed.pop().is_some() {
+        if self.armed.take().is_some() || self.picked.take().is_some() || self.typed.pop().is_some()
+        {
             self.dirty = true;
         }
     }
 
     fn reset_input(&mut self) {
         self.typed.clear();
-        self.disarm();
+        self.armed = None;
+        self.picked = None;
         self.dirty = true;
-    }
-
-    fn arm(&mut self, ch: char) {
-        self.armed = Some(ch);
-        self.armed_at = Some(Instant::now());
-        self.dirty = true;
-    }
-
-    fn disarm(&mut self) -> Option<char> {
-        self.armed_at = None;
-        self.armed.take()
-    }
-
-    /// Confirm an armed key that has been waiting long enough. This is what
-    /// makes the second press optional.
-    fn expire_armed(&mut self) {
-        let Some(delay) = config::get().confirm_delay() else {
-            return;
-        };
-        if self.armed_at.is_some_and(|at| at.elapsed() >= delay) {
-            self.commit_key();
-        }
-    }
-
-    /// How long until the armed key confirms itself, if one is armed.
-    fn arm_deadline(&self) -> Option<Duration> {
-        let delay = config::get().confirm_delay()?;
-        self.armed_at.map(|at| delay.saturating_sub(at.elapsed()))
-    }
-
-    /// Whether confirming this key would click rather than narrow. A key that
-    /// would click is never confirmed by pressing a different one: that press
-    /// means the target was wrong.
-    fn would_click(&self, ch: char) -> bool {
-        match self.stage {
-            Stage::PickTile { .. } => true,
-            Stage::PickHint { .. } => {
-                let mut probe = self.typed.clone();
-                probe.push(ch);
-                self.hints.iter().any(|h| h.label == probe)
-            }
-            Stage::PickWindow => false,
-        }
     }
 
     fn pick_window(&mut self) {
@@ -519,88 +539,22 @@ impl App {
         self.reset_input();
     }
 
-    fn click(&mut self, target: (f64, f64)) {
-        self.target = Some(target);
-        self.exit = true;
-    }
-
-    /// The hints still reachable, that is the ones starting with what has
-    /// been confirmed so far plus the given key.
+    /// Whether this key would select anything at all, so a key that means
+    /// nothing here can be ignored rather than shown.
     fn leads_anywhere(&self, ch: char) -> bool {
-        let mut probe = self.typed.clone();
-        probe.push(ch);
-        self.hints.iter().any(|h| h.label.starts_with(&probe))
-    }
-
-    /// Confirm the armed key. Enter does this; so does pressing that key a
-    /// second time.
-    fn commit_key(&mut self) {
-        let Some(ch) = self.disarm() else {
-            return;
-        };
-        self.dirty = true;
         match self.stage {
+            Stage::PickWindow => ch
+                .to_digit(10)
+                .is_some_and(|d| (1..=self.snap.windows.len()).contains(&(d as usize))),
             Stage::PickTile { win } => {
                 let w = &self.snap.windows[win];
-                if let Some(t) = grid::tile_for(w.w as f64, w.h as f64, ch) {
-                    self.click((w.x as f64 + t.x + t.w / 2.0, w.y as f64 + t.y + t.h / 2.0));
-                }
+                grid::tile_for(w.w as f64, w.h as f64, ch).is_some()
             }
             Stage::PickHint { .. } => {
-                self.typed.push(ch);
-                if let Some(h) = self.hints.iter().find(|h| h.label == self.typed) {
-                    self.click((h.cx, h.cy));
-                }
+                let mut probe = self.typed.clone();
+                probe.push(ch);
+                self.hints.iter().any(|h| h.label.starts_with(&probe))
             }
-            Stage::PickWindow => {}
-        }
-    }
-
-    fn press_tile(&mut self, win: usize, ch: char) {
-        if !ch.is_ascii_lowercase() {
-            return;
-        }
-        if self.armed == Some(ch) {
-            self.commit_key();
-            return;
-        }
-        // Another letter aims somewhere else, so the armed tile is dropped
-        // rather than confirmed: confirming it would click it.
-        let w = &self.snap.windows[win];
-        if grid::tile_for(w.w as f64, w.h as f64, ch).is_some() {
-            self.arm(ch);
-        }
-    }
-
-    /// Every key of a hint is confirmed on its own: the first press arms the
-    /// key and shows what it would leave, the second press commits it, and
-    /// committing the last key of a label clicks that element. A key that
-    /// leads nowhere is ignored, and any other key moves the preview.
-    fn press_hint(&mut self, ch: char) {
-        if !ch.is_ascii_lowercase() {
-            return;
-        }
-        if self.armed == Some(ch) {
-            self.commit_key();
-            return;
-        }
-        if let Some(armed) = self.armed {
-            // Typing on: a key that only narrows has served its purpose and
-            // is confirmed by the next one, which is what makes a two-key
-            // hint two presses when typed at speed. A key that would click
-            // is dropped instead, since this press says it was the wrong
-            // target.
-            if self.would_click(armed) {
-                self.disarm();
-            } else {
-                self.commit_key();
-                if self.exit {
-                    return;
-                }
-            }
-        }
-        if self.leads_anywhere(ch) {
-            self.arm(ch);
         }
     }
 
@@ -673,13 +627,21 @@ impl App {
         match self.stage {
             Stage::PickWindow => draw_pick_window(&self.snap, &self.font, &mut canvas, scale),
             Stage::PickTile { win } => {
-                draw_pick_tile(&self.snap, win, self.armed, &self.font, &mut canvas, scale)
+                let lit = match self.picked {
+                    Some((Target::Tile(ch), _)) => Some(ch),
+                    _ => self.armed,
+                };
+                draw_pick_tile(&self.snap, win, lit, &self.font, &mut canvas, scale)
             }
             Stage::PickHint { win } => {
                 let view = HintView {
                     hints: &self.hints,
                     typed: &self.typed,
                     armed: self.armed,
+                    picked: match self.picked {
+                        Some((Target::Hint(i), _)) => Some(i),
+                        _ => None,
+                    },
                 };
                 draw_pick_hint(&self.snap, win, view, &self.font, &mut canvas, scale)
             }
@@ -703,7 +665,12 @@ fn hints_for(w: &crate::hypr::Window, els: &[Element]) -> Vec<Hint> {
         .collect();
     els.iter()
         .zip(centers.iter())
-        .zip(hint::labels(&centers, w.w as f64, w.h as f64))
+        .zip(hint::labels(
+            &centers,
+            w.w as f64,
+            w.h as f64,
+            &config::get().keys.reserved_letters(),
+        ))
         .map(|((e, &(cx, cy)), label)| Hint {
             label,
             rx: w.x as f64 + e.x,
@@ -761,6 +728,7 @@ pub fn render(
             hints: &hints,
             typed: &typed,
             armed,
+            picked: None,
         };
         draw_pick_hint(snap, win, view, &font, &mut canvas, scale);
     }
@@ -967,6 +935,8 @@ struct HintView<'a> {
     hints: &'a [Hint],
     typed: &'a str,
     armed: Option<char>,
+    /// The hint a completed label picked out, waiting for a click key.
+    picked: Option<usize>,
 }
 
 fn draw_pick_hint(
@@ -981,19 +951,22 @@ fn draw_pick_hint(
         hints,
         typed,
         armed,
+        picked,
     } = view;
     // What the armed key would leave behind, which is what it previews.
     let preview = armed.map(|ch| format!("{typed}{ch}"));
-    // One candidate left means confirming that key clicks, so it is worth
-    // more than the green a narrowing press gets.
-    let clinches = preview.as_deref().is_some_and(|p| {
-        hints
-            .iter()
-            .filter(|h| h.label.starts_with(p))
-            .take(2)
-            .count()
-            == 1
-    });
+    // One candidate left means the next press takes it, so it is worth more
+    // than the green a narrowing press gets. A picked target is that, arrived
+    // at: it stays lit while it waits for a click key.
+    let clinches = picked.is_some()
+        || preview.as_deref().is_some_and(|p| {
+            hints
+                .iter()
+                .filter(|h| h.label.starts_with(p))
+                .take(2)
+                .count()
+                == 1
+        });
     let mon = &snap.monitor;
     let w = &snap.windows[win];
     let s = scale as f32;
@@ -1013,11 +986,12 @@ fn draw_pick_hint(
     let boxes = place_labels(hints, font, (mon.x, mon.y), (canvas.w, canvas.h), scale);
     // What the armed key keeps is drawn last so nothing can cover it.
     for pass_hot in [false, true] {
-        for (h, b) in hints.iter().zip(&boxes) {
+        for (i, (h, b)) in hints.iter().zip(&boxes).enumerate() {
             if !h.label.starts_with(typed) {
                 continue;
             }
-            let hot = preview.as_deref().is_some_and(|p| h.label.starts_with(p));
+            let hot =
+                picked == Some(i) || preview.as_deref().is_some_and(|p| h.label.starts_with(p));
             if hot != pass_hot {
                 continue;
             }
@@ -1120,17 +1094,47 @@ fn draw_label_text(
 /// The key a wl_keyboard event stands for. Only used on the fallback path,
 /// where the overlay holds the keyboard itself.
 fn key_of(event: &KeyEvent) -> Option<Key> {
+    let cfg = &config::get().keys;
     match event.keysym {
-        Keysym::Escape => Some(Key::Escape),
-        Keysym::BackSpace => Some(Key::Backspace),
-        Keysym::Return | Keysym::KP_Enter => Some(Key::Enter),
-        Keysym::Tab => Some(Key::Tab),
-        _ => event
-            .utf8
-            .as_deref()
-            .and_then(|s| s.chars().next())
-            .map(Key::Char),
+        Keysym::Escape => return Some(Key::Escape),
+        Keysym::BackSpace => return Some(Key::Backspace),
+        Keysym::Tab => return Some(Key::Tab),
+        _ => {}
     }
+    let name = keysym_name(event);
+    if name == cfg.left() {
+        return Some(Key::LeftClick);
+    }
+    if name == cfg.right() {
+        return Some(Key::RightClick);
+    }
+    event
+        .utf8
+        .as_deref()
+        .and_then(|s| s.chars().next())
+        .map(Key::Char)
+}
+
+/// What the config would call this key. Enough of the keyboard to match a
+/// click key by name; anything else is matched by the text it types.
+fn keysym_name(event: &KeyEvent) -> String {
+    let named = match event.keysym {
+        Keysym::Return | Keysym::KP_Enter => "return",
+        Keysym::space => "space",
+        Keysym::minus | Keysym::KP_Subtract => "minus",
+        Keysym::equal => "equal",
+        Keysym::backslash => "backslash",
+        Keysym::semicolon => "semicolon",
+        Keysym::apostrophe => "apostrophe",
+        Keysym::comma => "comma",
+        Keysym::period => "period",
+        Keysym::slash => "slash",
+        Keysym::bracketleft => "bracketleft",
+        Keysym::bracketright => "bracketright",
+        Keysym::grave => "grave",
+        _ => return event.utf8.clone().unwrap_or_default(),
+    };
+    named.to_string()
 }
 
 impl Dispatch<HyprlandGlobalShortcutV1, Key> for App {

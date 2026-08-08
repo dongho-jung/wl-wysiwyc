@@ -81,11 +81,24 @@ pub struct Snapshot {
     pub layout_extent: (i32, i32),
 }
 
-/// The submap the overlay's keys live in, named after the app so the
-/// shortcut ids and the submap read the same in `hyprctl binds`.
-const SUBMAP: &str = "wl-wysiwyc";
 /// The key that leaves the submap without asking this process anything.
 const RESCUE: &str = "CTRL + escape";
+/// The app id the global shortcuts are registered under.
+const APP: &str = "wl-wysiwyc";
+
+/// The submap the overlay's keys live in. The name carries a digest of the
+/// keys themselves, because a submap cannot be cleared: defining one twice
+/// appends a second copy of every bind, and a key bound twice would take a
+/// hint the moment it is shown. Changing which keys the overlay wants
+/// therefore means a new submap rather than a redefinition of this one.
+fn submap_name(keys: &[String]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in keys.join(" ").bytes() {
+        h ^= byte as u64;
+        h = h.wrapping_mul(0x100_0000_01b3);
+    }
+    format!("wl-wysiwyc.{:08x}", h as u32)
+}
 
 fn hyprctl(args: &[&str]) -> Result<String, Box<dyn Error>> {
     let out = Command::new("hyprctl").args(args).output()?;
@@ -96,33 +109,31 @@ fn hyprctl(args: &[&str]) -> Result<String, Box<dyn Error>> {
     Ok(reply)
 }
 
-/// Whether the submap already holds our binds. Defining it twice appends a
-/// second copy of every bind, and a key bound twice fires twice, which would
-/// confirm a hint the moment it is armed.
-fn submap_defined() -> bool {
-    hyprctl(&["binds"]).is_ok_and(|b| b.contains(&format!("submap: {SUBMAP}")))
+/// Whether this submap already holds our binds.
+fn submap_defined(name: &str) -> bool {
+    hyprctl(&["binds"]).is_ok_and(|b| b.contains(&format!("submap: {name}")))
 }
 
 /// Define the submap that turns each key into a global shortcut. Hyprland
 /// takes config either as Lua or in its own language depending on how it was
 /// set up, and only one of the two answers to a given call, so try both.
-fn define_submap(keys: &[String]) -> Result<(), Box<dyn Error>> {
+fn define_submap(name: &str, keys: &[String]) -> Result<(), Box<dyn Error>> {
     let mut lua_binds: String = keys
         .iter()
-        .map(|k| format!("hl.bind(\"{k}\", hl.dsp.global(\"{SUBMAP}:{k}\")) "))
+        .map(|k| format!("hl.bind(\"{k}\", hl.dsp.global(\"{APP}:{k}\")) "))
         .collect();
     // A way out that does not depend on this process being alive to answer.
     // Every other key in the submap dispatches to it, so if it wedges or is
     // killed between the submap going up and coming down, this is the only
     // key that still does anything.
     lua_binds.push_str(&format!("hl.bind(\"{RESCUE}\", hl.dsp.submap(\"reset\")) "));
-    let lua = format!("hl.define_submap(\"{SUBMAP}\", function() {lua_binds}end)");
+    let lua = format!("hl.define_submap(\"{name}\", function() {lua_binds}end)");
     if hyprctl(&["eval", &lua]).is_ok_and(|r| r == "ok") {
         return Ok(());
     }
-    let mut batch = format!("keyword submap {SUBMAP} ; ");
+    let mut batch = format!("keyword submap {name} ; ");
     for k in keys {
-        batch.push_str(&format!("keyword bind ,{k},global,{SUBMAP}:{k} ; "));
+        batch.push_str(&format!("keyword bind ,{k},global,{APP}:{k} ; "));
     }
     batch.push_str("keyword bind CTRL,escape,submap,reset ; ");
     batch.push_str("keyword submap reset");
@@ -133,13 +144,14 @@ fn define_submap(keys: &[String]) -> Result<(), Box<dyn Error>> {
 /// Send the compositor into the overlay's submap, defining it first if this
 /// is the first run since Hyprland started.
 pub fn enter_submap(keys: &[String]) -> Result<(), Box<dyn Error>> {
-    if !submap_defined() {
-        define_submap(keys)?;
-        if !submap_defined() {
-            return Err(format!("submap {SUBMAP} did not take").into());
+    let name = submap_name(keys);
+    if !submap_defined(&name) {
+        define_submap(&name, keys)?;
+        if !submap_defined(&name) {
+            return Err(format!("submap {name} did not take").into());
         }
     }
-    dispatch_submap(SUBMAP)?;
+    dispatch_submap(&name)?;
     watch_for_death();
     Ok(())
 }

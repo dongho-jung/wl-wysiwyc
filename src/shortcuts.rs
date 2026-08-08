@@ -41,35 +41,45 @@ pub enum Key {
     Char(char),
     Escape,
     Backspace,
-    Enter,
     Tab,
+    LeftClick,
+    RightClick,
 }
 
 impl Key {
-    /// The shortcut id, which is also the xkb key name the submap binds.
+    /// The shortcut id, which is also the xkb key name the submap binds. The
+    /// click keys are whatever the config says they are.
     pub fn name(self) -> String {
         match self {
             Key::Char(' ') => "space".into(),
             Key::Char(c) => c.to_string(),
             Key::Escape => "escape".into(),
             Key::Backspace => "backspace".into(),
-            Key::Enter => "return".into(),
             Key::Tab => "tab".into(),
+            Key::LeftClick => crate::config::get().keys.left(),
+            Key::RightClick => crate::config::get().keys.right(),
         }
     }
 }
 
 /// Every key the overlay listens for: hint letters, window numbers, the mode
-/// toggle, and the ones that back out or confirm.
+/// toggle, the ones that back out, and the ones that click. A letter the
+/// config gave to a click key is registered once, as that click key, so the
+/// compositor is never asked to bind the same name twice.
 pub fn keys() -> Vec<Key> {
-    let mut out: Vec<Key> = ('a'..='z').map(Key::Char).collect();
+    let reserved = crate::config::get().keys.reserved_letters();
+    let mut out: Vec<Key> = ('a'..='z')
+        .filter(|c| !reserved.contains(c))
+        .map(Key::Char)
+        .collect();
     out.extend(('1'..='9').map(Key::Char));
     out.extend([
         Key::Char(' '),
         Key::Escape,
         Key::Backspace,
-        Key::Enter,
         Key::Tab,
+        Key::LeftClick,
+        Key::RightClick,
     ]);
     out
 }

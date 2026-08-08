@@ -56,10 +56,13 @@ enters it. Triggering a shortcut delivers an event without touching
 focus, so the window under the overlay stays exactly as it was, pointer
 and activation and hover included.
 
-The submap is defined once per Hyprland session: defining it twice binds
-every key twice, and a key bound twice would arm and confirm in one
-press. Hyprland takes its config either as Lua or in its own language,
-and only one of the two answers a given call, so both forms are tried.
+A submap cannot be cleared, and defining one twice appends a second copy
+of every bind, which would make one press count as two. So the submap's
+name carries a digest of the keys in it: the same keys find the same
+submap already defined, and changing which keys the overlay wants means
+a new submap rather than a redefinition. Hyprland takes its config
+either as Lua or in its own language, and only one of the two answers a
+given call, so both forms are tried.
 
 Getting out of the submap has three guards, because every key in it
 dispatches to this client and being stuck there with the client gone
@@ -79,39 +82,29 @@ A compositor without the protocol, or a submap that will not take,
 falls back to holding the keyboard the ordinary way, hover cost and
 all.
 
-### Arming
+### What a key press does
 
-No key press commits on the way down. The first press of a key arms it:
-whatever that key would select turns green and the rest steps back.
-Pressing the same key again, or Enter, confirms it, and confirming the
-last key of a hint clicks that element. An armed key also confirms
-itself once it has been waiting `confirm_ms` (300 by default), so the
-second press is a shortcut past the wait rather than a toll on every
-key. Backspace undoes one press, and a key that leads nowhere is
-ignored.
+One press is one key. A key that means nothing where you are is
+ignored, so a hint typed at speed is one press per character.
 
-Typing on has the same effect as waiting: a key that would only narrow
-the field is confirmed by the next key, so a two-key hint typed at speed
-is two presses. A key that would click is not, since a further key press
-says the target was wrong.
+Completing a hint or picking a grid tile does not click. It puts the
+pointer on that target and stops there, marked green with a ring, and
+then `left_click` (Enter by default) clicks it, `right_click`
+(backslash) right-clicks it, and typing another hint moves the target
+somewhere else. Moving the pointer is the point of the pause as much as
+the choice of button is: it is how the window under it shows a hover,
+and how a menu that only opens on hover can be opened at all.
 
-An armed key is drawn pressed inside every label it would keep, a dark
-cap over that one character, and those labels turn green. One that
-leaves a single candidate also rings and glows the element itself,
-which a press that only narrows the field does not.
+Two settings change this. `keys.instant` clicks the moment a hint is
+complete, skipping the pause and the choice. `keys.confirm` asks for
+every key twice: the first press arms it, and until it is pressed again
+nothing has been selected. An armed key is drawn pressed inside every
+label it would keep, a dark cap over that one character, and those
+labels turn green.
 
-What an armed key would rule out is left alone. Nothing is confirmed
-yet, so dimming those labels would answer a question the press has only
-asked; they keep their colour and the candidates are drawn last so
-nothing covers them. Confirmed keys, on the other hand, do step back:
-they stay in their label and dim in place, which keeps a label the same
-size from first press to last and shows how far along it is. A label's
-characters are spaced apart so the cap never runs into the character
-beside it.
-
-So a hint of DJ is d, d, j, j: two keys, each confirmed separately.
-This holds in both modes, and it is what makes the overlay usable
-without looking at the keyboard.
+Esc unwinds one step at a time: the armed key, then the target, then
+what was typed, then the overlay. Backspace undoes one key press. Space
+swaps element hints for the letter grid. Tab opens the window picker.
 
 ### Hint mode
 
@@ -131,16 +124,14 @@ rather than squeezing a column of elements into the three keys above
 each other. Labels are prefix-free, so a complete label is never the
 start of another one.
 
-Each confirmed key narrows the visible hints. Labels sit at the
-top-left corner of their element, vimium style, unless the element is
-small enough for the label to swallow it, in which case the label goes
-beside it: a rail of icons is unusable when every icon is under a
-label. Either way, a label that would land on one already placed, or
-right up against it, tries the element's other sides first. Only the
-element about to be clicked is outlined, since ringing every candidate
-turns a dense corner of a window into a mess of boxes. Esc drops the
-armed key, then the confirmed ones, then quits. Space switches to the
-grid for spots the tree does not cover.
+Each key narrows the visible hints. Labels sit at the top-left corner of
+their element, vimium style, unless the element is small enough for the
+label to swallow it, in which case the label goes beside it: a row of
+icons is unusable when every icon is under a label. Either way, a label
+that would land on one already placed, or right up against it, tries the
+element's other sides first. Only the element
+about to be clicked is outlined, since ringing every candidate turns a
+dense corner of a window into a mess of boxes.
 
 ### Grid mode
 
