@@ -33,10 +33,18 @@ enters hint mode; otherwise it falls back to the grid.
 
 ### Hint mode
 
-Every clickable element gets an amber label (`src/hint.rs`): single
-letters while 26 suffice, uniform two-letter combinations beyond that,
-home row first. Typing narrows the visible hints; completing a label
-clicks the center of that element. Backspace edits the typed prefix,
+Every clickable element gets an amber label (`src/hint.rs`). Position
+picks the key: the three qwerty rows are laid over the elements the way
+the grid is laid over a window, so an element in the top-left corner is
+labelled near Q and one in the bottom-right near M. One key per element
+while 26 suffice; past that the key becomes a prefix and the elements
+that share it are labelled the same way again, which keeps labels short
+where the window is sparse and grows them only where it is crowded.
+Labels are prefix-free, so a complete label is never the start of
+another one.
+
+Typing narrows the visible hints; completing a label clicks the center
+of that element. Backspace edits the typed prefix,
 Esc clears it (then returns to the window picker), Space switches to
 the grid for spots the tree does not cover.
 

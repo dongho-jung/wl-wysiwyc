@@ -408,18 +408,22 @@ impl App {
     fn enter_hint_stage(&mut self, win: usize) {
         let els = self.elements_cache.get(&win).cloned().unwrap_or_default();
         let w = &self.snap.windows[win];
-        let labels = hint::labels(els.len());
+        let centers: Vec<(f64, f64)> = els
+            .iter()
+            .map(|e| (e.x + e.w / 2.0, e.y + e.h / 2.0))
+            .collect();
         self.hints = els
             .iter()
-            .zip(labels)
-            .map(|(e, label)| Hint {
+            .zip(centers.iter())
+            .zip(hint::labels(&centers))
+            .map(|((e, &(cx, cy)), label)| Hint {
                 label,
                 rx: w.x as f64 + e.x,
                 ry: w.y as f64 + e.y,
                 rw: e.w,
                 rh: e.h,
-                cx: w.x as f64 + e.x + e.w / 2.0,
-                cy: w.y as f64 + e.y + e.h / 2.0,
+                cx: w.x as f64 + cx,
+                cy: w.y as f64 + cy,
             })
             .collect();
         self.typed.clear();
