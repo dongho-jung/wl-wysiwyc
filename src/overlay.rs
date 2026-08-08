@@ -48,7 +48,7 @@ const TILE_BORDER: Color = Color::new(1.0, 1.0, 1.0, 0.45);
 const HINT_BG: Color = Color::new(0.99, 0.76, 0.16, 0.96);
 const HINT_EDGE: Color = Color::new(0.35, 0.24, 0.02, 0.9);
 const HINT_TEXT: Color = Color::new(0.12, 0.08, 0.0, 1.0);
-const HINT_RING: Color = Color::new(1.0, 0.85, 0.3, 0.5);
+const HINT_RING: Color = Color::new(1.0, 0.85, 0.3, 0.45);
 /// The armed target, one key press away from being clicked.
 const ARMED_BG: Color = Color::new(0.16, 0.83, 0.55, 0.98);
 const ARMED_EDGE: Color = Color::new(0.02, 0.25, 0.14, 0.95);
@@ -380,8 +380,6 @@ impl App {
         self.dirty = true;
     }
 
-    /// Leave the window the overlay opened on and choose another one by
-    /// number.
     fn pick_window(&mut self) {
         if matches!(self.stage, Stage::PickWindow) {
             return;
@@ -654,6 +652,72 @@ fn draw_pick_tile(
     }
 }
 
+/// Where a label sits on screen: buffer pixels, already clamped to the
+/// canvas.
+struct LabelBox {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+fn overlaps(a: &LabelBox, b: &LabelBox) -> bool {
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+}
+
+/// Lay out one box per hint. Labels want the top-left corner of their
+/// element, vimium style, but a dense tree stacks them on top of each other,
+/// so a box that would land on an earlier one tries the element's other
+/// corners and sides first. Placement covers every hint, not just the
+/// visible ones, so labels stay put while a prefix is typed.
+fn place_labels(
+    hints: &[Hint],
+    font: &Font,
+    px: f32,
+    pad: i32,
+    mon: (i32, i32),
+    canvas: (i32, i32),
+    scale: i32,
+) -> Vec<LabelBox> {
+    let mut taken: Vec<LabelBox> = Vec::with_capacity(hints.len());
+    for h in hints {
+        let ex = ((h.rx - mon.0 as f64) * scale as f64) as i32;
+        let ey = ((h.ry - mon.1 as f64) * scale as f64) as i32;
+        let ew = (h.rw * scale as f64) as i32;
+        let eh = (h.rh * scale as f64) as i32;
+        let w = draw::text_width(font, &h.label.to_ascii_uppercase(), px) as i32 + 2 * pad;
+        let h_ = px as i32 + 2 * pad;
+        let spots = [
+            (ex, ey - h_ / 2),
+            (ex + ew - w, ey - h_ / 2),
+            (ex, ey + eh - h_ / 2),
+            (ex + ew - w, ey + eh - h_ / 2),
+            (ex - w, ey + (eh - h_) / 2),
+            (ex + ew, ey + (eh - h_) / 2),
+        ];
+        let mut chosen = None;
+        for (x, y) in spots {
+            let b = LabelBox {
+                x: x.clamp(0, (canvas.0 - w).max(0)),
+                y: y.clamp(0, (canvas.1 - h_).max(0)),
+                w,
+                h: h_,
+            };
+            if !taken.iter().any(|t| overlaps(t, &b)) {
+                chosen = Some(b);
+                break;
+            }
+        }
+        taken.push(chosen.unwrap_or(LabelBox {
+            x: spots[0].0.clamp(0, (canvas.0 - w).max(0)),
+            y: spots[0].1.clamp(0, (canvas.1 - h_).max(0)),
+            w,
+            h: h_,
+        }));
+    }
+    taken
+}
+
 /// What hint mode has to show: the hints themselves, the prefix typed so
 /// far, and which hint is armed.
 struct HintView<'a> {
@@ -685,44 +749,49 @@ fn draw_pick_hint(
         2 * scale,
         TILE_BORDER,
     );
-    let px = 15.0 * scale as f32;
-    let pad = 4 * scale;
-    for (i, h) in hints.iter().enumerate() {
+    let px = 14.0 * scale as f32;
+    let pad = 3 * scale;
+    let boxes = place_labels(
+        hints,
+        font,
+        px,
+        pad,
+        (mon.x, mon.y),
+        (canvas.w, canvas.h),
+        scale,
+    );
+    for (i, (h, b)) in hints.iter().zip(&boxes).enumerate() {
         if !h.label.starts_with(typed) {
             continue;
         }
         let hot = armed == Some(i);
-        let ex = ((h.rx - mon.x as f64) * scale as f64) as i32;
-        let ey = ((h.ry - mon.y as f64) * scale as f64) as i32;
-        let ew = (h.rw * scale as f64) as i32;
-        let eh = (h.rh * scale as f64) as i32;
-        canvas.stroke_rect(
-            ex,
-            ey,
-            ew,
-            eh,
-            if hot { 2 * scale } else { scale.max(1) },
-            if hot { ARMED_RING } else { HINT_RING },
-        );
+        // Outlining every element at once is noise; the outline only earns
+        // its place once typing has narrowed the field.
+        if hot || !typed.is_empty() {
+            canvas.stroke_rect(
+                ((h.rx - mon.x as f64) * scale as f64) as i32,
+                ((h.ry - mon.y as f64) * scale as f64) as i32,
+                (h.rw * scale as f64) as i32,
+                (h.rh * scale as f64) as i32,
+                if hot { 2 * scale } else { scale.max(1) },
+                if hot { ARMED_RING } else { HINT_RING },
+            );
+        }
         let rem = h.label[typed.len()..].to_ascii_uppercase();
-        let bw = draw::text_width(font, &rem, px) as i32 + 2 * pad;
-        let bh = px as i32 + 2 * pad;
-        let bx = ex.clamp(0, (canvas.w - bw).max(0));
-        let by = (ey - bh / 2).clamp(0, (canvas.h - bh).max(0));
-        canvas.fill_rect(bx, by, bw, bh, if hot { ARMED_BG } else { HINT_BG });
+        canvas.fill_rect(b.x, b.y, b.w, b.h, if hot { ARMED_BG } else { HINT_BG });
         canvas.stroke_rect(
-            bx,
-            by,
-            bw,
-            bh,
+            b.x,
+            b.y,
+            b.w,
+            b.h,
             scale.max(1),
             if hot { ARMED_EDGE } else { HINT_EDGE },
         );
         canvas.text_centered(
             font,
             &rem,
-            bx as f32 + bw as f32 / 2.0,
-            by as f32 + bh as f32 / 2.0,
+            b.x as f32 + b.w as f32 / 2.0,
+            b.y as f32 + b.h as f32 / 2.0,
             px,
             if hot { ARMED_TEXT } else { HINT_TEXT },
         );

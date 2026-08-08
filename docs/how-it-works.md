@@ -55,8 +55,12 @@ Labels are prefix-free, so a complete label is never the start of
 another one.
 
 Typing narrows the visible hints, and the press that leaves a single
-candidate arms it. Backspace steps back, Esc clears the typed prefix
-and then quits, Space switches to the grid for spots the tree does not
+candidate arms it. Labels sit at the top-left corner of their element,
+vimium style, but a label that would land on one already placed tries
+the element's other corners and sides first. Element outlines are drawn
+only once typing has narrowed the field, since outlining everything at
+once is noise. Backspace steps back, Esc clears the typed prefix and
+then quits, Space switches to the grid for spots the tree does not
 cover.
 
 ### Grid mode
