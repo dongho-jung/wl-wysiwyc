@@ -105,8 +105,14 @@ labels turn green.
 Esc unwinds one step at a time: the armed key, then the target, then
 what was typed, then the overlay. Backspace undoes one key press. Space
 swaps element hints for the letter grid. Tab opens the window picker.
-Triggering the tool again while it is up cancels it, so whatever key
-starts it also stops it.
+
+`keys.reset` is worth setting to whatever key opens the overlay. While
+the overlay is up its keys live in a compositor submap, and a submap
+answers only for the keys in it, so the keybind that started the overlay
+cannot fire again: that key does nothing unless the overlay claims it.
+Claimed, it starts the choices over, which is what a key pressed by
+mistake should do. Launching the tool again from anywhere else, a
+terminal or a second keybind, cancels the overlay instead.
 
 ### Hint mode
 

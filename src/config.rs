@@ -65,6 +65,12 @@ pub struct Keys {
     /// so it cannot mean two things at once.
     pub left_click: String,
     pub right_click: String,
+    /// An extra key that clears everything typed and starts the overlay's
+    /// choices over, the way Esc does before it gives up. Worth setting to
+    /// whatever key opens the overlay: while the overlay is up that key
+    /// belongs to it, so pressing it again undoes a wrong turn instead of
+    /// doing nothing. Empty means no such key.
+    pub reset: String,
 }
 
 impl Default for Keys {
@@ -74,6 +80,7 @@ impl Default for Keys {
             instant: false,
             left_click: "minus".into(),
             right_click: "equal".into(),
+            reset: String::new(),
         }
     }
 }
@@ -90,10 +97,16 @@ impl Keys {
         key_name(&self.right_click)
     }
 
+    /// The reset key's name, if one is set.
+    pub fn reset(&self) -> Option<String> {
+        Some(key_name(&self.reset)).filter(|k| !k.is_empty())
+    }
+
     /// The letters the click keys have taken, which no label may use.
     pub fn reserved_letters(&self) -> Vec<char> {
-        [self.left(), self.right()]
+        [Some(self.left()), Some(self.right()), self.reset()]
             .into_iter()
+            .flatten()
             .filter_map(|k| {
                 let mut cs = k.chars();
                 match (cs.next(), cs.next()) {
@@ -288,6 +301,7 @@ mod tests {
         assert!(!c.keys.instant);
         assert_eq!(c.keys.left(), "minus");
         assert_eq!(c.keys.right(), "equal");
+        assert_eq!(c.keys.reset(), None);
         assert_eq!(c.label.size, 11.5);
         assert_eq!(c.elements.max, 400);
     }

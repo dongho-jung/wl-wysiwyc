@@ -31,6 +31,13 @@ keys:
   left_click: minus
   right_click: equal
 
+  # An extra key that clears everything and starts over, the way Esc
+  # does before it gives up. Worth setting to whatever key opens the
+  # overlay: while the overlay is up that key belongs to the overlay
+  # rather than to the keybind that started it, so a second press can
+  # undo a wrong turn instead of doing nothing. Empty means none.
+  reset: ""
+
 label:
   size: 11.5    # text size
   pad_x: 4.5    # space either side of the text
@@ -67,7 +74,7 @@ elements:
   twice.
 - A click key does not have to be one of the two defaults. Any key xkb
   can name works, and if it is a letter the hints and the grid make room
-  by leaving that letter out.
+  by leaving that letter out. The same goes for `reset`.
 - Labels are slightly transparent on purpose, so a small icon under one
   is still recognisable. End `hint` with `ff` for solid labels.
 - Raising `elements.walk_ms` gets more of a heavy page hinted at the

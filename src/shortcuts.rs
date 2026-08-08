@@ -44,6 +44,8 @@ pub enum Key {
     Tab,
     LeftClick,
     RightClick,
+    /// Start the overlay's choices over, without giving up on it.
+    Reset,
 }
 
 impl Key {
@@ -58,6 +60,7 @@ impl Key {
             Key::Tab => "tab".into(),
             Key::LeftClick => crate::config::get().keys.left(),
             Key::RightClick => crate::config::get().keys.right(),
+            Key::Reset => crate::config::get().keys.reset().unwrap_or_default(),
         }
     }
 }
@@ -81,6 +84,13 @@ pub fn keys() -> Vec<Key> {
         Key::LeftClick,
         Key::RightClick,
     ]);
+    // The key that opens the overlay is usually this one, and while the
+    // overlay is up the compositor gives it to the submap rather than to the
+    // keybind that started it. Binding it here is what makes a second press
+    // mean something.
+    if crate::config::get().keys.reset().is_some() {
+        out.push(Key::Reset);
+    }
     out
 }
 

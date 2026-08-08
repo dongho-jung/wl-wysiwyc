@@ -392,6 +392,7 @@ impl App {
             Key::Tab => return self.pick_window(),
             Key::LeftClick => return self.click_picked(BTN_LEFT),
             Key::RightClick => return self.click_picked(BTN_RIGHT),
+            Key::Reset => return self.reset_input(),
             Key::Char(ch) => ch.to_ascii_lowercase(),
         };
         if ch == ' ' {
@@ -1139,6 +1140,9 @@ fn key_of(event: &KeyEvent) -> Option<Key> {
     if name == cfg.right() {
         return Some(Key::RightClick);
     }
+    if cfg.reset().is_some_and(|k| k == name) {
+        return Some(Key::Reset);
+    }
     event
         .utf8
         .as_deref()
@@ -1163,6 +1167,7 @@ fn keysym_name(event: &KeyEvent) -> String {
         Keysym::bracketleft => "bracketleft",
         Keysym::bracketright => "bracketright",
         Keysym::grave => "grave",
+        Keysym::Hangul => "Hangul",
         _ => return event.utf8.clone().unwrap_or_default(),
     };
     named.to_string()
