@@ -175,11 +175,15 @@ that lag as a hand.
 
 The overlay opens with the target already on whatever the pointer is
 nearest, so a click can need no typing at all, and the arrow keys move
-it from there. A step goes to the nearest target roughly in line that
-way, and only widens its search when nothing is in line, which is what
-walks a row of buttons or a column of list items without surprises. The
-pointer travels to a new target over about a tenth of a second rather
-than jumping, since a pointer that jumps leaves you hunting for it.
+it from there. A step goes to whichever target that way pulls hardest,
+which is mostly whichever is nearest: being off the line counts against
+one, but not enough to reach past three targets for a fourth that
+happens to line up, which is what makes a step through a tangle of
+hints land on the next thing over rather than somewhere across the
+window. The pointer travels there over about a tenth of a second rather
+than jumping, and a little past the target before settling on it: a
+pointer that arrives dead on reads as having been placed there, one
+that settles reads as having been pulled.
 
 Esc unwinds one step at a time: the armed key, then the target, then
 what was typed, then the overlay. Backspace undoes one key press.

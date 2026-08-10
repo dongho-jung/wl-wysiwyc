@@ -112,8 +112,11 @@ impl Glide {
     fn at(&self) -> ((f64, f64), bool) {
         let time = config::get().pointer.travel().as_secs_f64().max(0.001);
         let t = (self.started.elapsed().as_secs_f64() / time).min(1.0);
-        // Ease out: quick off the mark, gentle into the target.
-        let e = 1.0 - (1.0 - t).powi(3);
+        // Quick off the mark, a little past the target, and back onto it: a
+        // pointer that arrives dead on reads as having been placed there,
+        // and one that settles reads as having been pulled.
+        let back = t - 1.0;
+        let e = 1.0 + 2.2 * back.powi(3) + 1.2 * back.powi(2);
         let x = self.from.0 + (self.to.0 - self.from.0) * e;
         let y = self.from.1 + (self.to.1 - self.from.1) * e;
         ((x, y), t >= 1.0)
@@ -934,10 +937,6 @@ impl App {
         if self.settle.is_some() {
             return;
         }
-        /// How far off the line a target can be and still count as in line,
-        /// in logical pixels: about a row of text.
-        const IN_LINE: f64 = 24.0;
-
         self.fresh = false;
         let from = match self.picked {
             Some((_, at)) => at,
@@ -947,27 +946,14 @@ impl App {
             },
         };
         let here = self.picked.map(|(p, _)| p);
-        let reach: Vec<(f64, f64, Target, (f64, f64))> = self
+        let targets: Vec<(Target, (f64, f64))> = self
             .targets()
             .into_iter()
             .filter(|&(what, _)| here != Some(what))
-            .filter_map(|(what, at)| {
-                let (ox, oy) = (at.0 - from.0, at.1 - from.1);
-                let along = ox * dx + oy * dy;
-                let across = (ox * dy - oy * dx).abs();
-                (along > 1.0 && across <= along).then_some((along, across, what, at))
-            })
             .collect();
-        let best = reach
-            .iter()
-            .filter(|&&(_, across, _, _)| across <= IN_LINE)
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .or_else(|| {
-                reach
-                    .iter()
-                    .min_by(|a, b| (a.0 + 3.0 * a.1).total_cmp(&(b.0 + 3.0 * b.1)))
-            });
-        if let Some(&(_, _, what, at)) = best {
+        let points: Vec<(f64, f64)> = targets.iter().map(|&(_, at)| at).collect();
+        if let Some(i) = pull(from, (dx, dy), &points) {
+            let (what, at) = targets[i];
             self.focus(what, at);
         }
     }
@@ -1209,6 +1195,32 @@ impl App {
         surface.damage_buffer(0, 0, bw, bh);
         surface.commit();
     }
+}
+
+/// Which of these points a step in a direction should land on.
+///
+/// Whichever pulls hardest, which is mostly whichever is nearest: a step is
+/// meant to land on the next thing over, and ranking by how well something
+/// lines up is what reaches past three of them for a fourth. Being off the
+/// line still counts against a target, enough to keep a row or a column
+/// reading straight when the choice is otherwise close.
+fn pull(from: (f64, f64), (dx, dy): (f64, f64), at: &[(f64, f64)]) -> Option<usize> {
+    /// What a pixel off the line costs, against a pixel of plain distance.
+    const ACROSS: f64 = 1.8;
+    /// How far off the line is still that way at all: about sixty degrees
+    /// either side.
+    const CONE: f64 = 1.7;
+    at.iter()
+        .enumerate()
+        .filter_map(|(i, &(x, y))| {
+            let (ox, oy) = (x - from.0, y - from.1);
+            let along = ox * dx + oy * dy;
+            let across = (ox * dy - oy * dx).abs();
+            (along > 2.0 && across <= CONE * along)
+                .then_some((along.hypot(across) + ACROSS * across, i))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, i)| i)
 }
 
 /// Label a window's elements and place them in global coordinates.
@@ -2093,3 +2105,53 @@ wayland_client::delegate_noop!(App: ignore wl_region::WlRegion);
 wayland_client::delegate_noop!(App: ignore HyprlandGlobalShortcutsManagerV1);
 wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerManagerV1);
 wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerV1);
+
+#[cfg(test)]
+mod tests {
+    use super::pull;
+
+    const RIGHT: (f64, f64) = (1.0, 0.0);
+    const DOWN: (f64, f64) = (0.0, 1.0);
+    const LEFT: (f64, f64) = (-1.0, 0.0);
+
+    #[test]
+    fn a_column_is_walked_one_row_at_a_time() {
+        let rows = [(0.0, 30.0), (0.0, 60.0), (0.0, 90.0)];
+        assert_eq!(pull((0.0, 0.0), DOWN, &rows), Some(0));
+        assert_eq!(pull((0.0, 30.0), DOWN, &rows), Some(1));
+        assert_eq!(pull((0.0, 90.0), DOWN, &rows), None);
+    }
+
+    #[test]
+    fn the_near_one_off_the_line_beats_the_far_one_on_it() {
+        // What a tangle of hints looks like: something right there but a row
+        // down, and something lined up but across the window. Ranking by how
+        // well things line up takes the far one and skips what is under your
+        // nose; nearness has to win by then.
+        let at = [(20.0, 25.0), (600.0, 0.0)];
+        assert_eq!(pull((0.0, 0.0), RIGHT, &at), Some(0));
+        // Still true a whole row of them along.
+        let row = [(40.0, 30.0), (80.0, 30.0), (300.0, 0.0)];
+        assert_eq!(pull((0.0, 0.0), RIGHT, &row), Some(0));
+    }
+
+    #[test]
+    fn lining_up_still_decides_a_close_call() {
+        let at = [(100.0, 0.0), (90.0, 60.0)];
+        assert_eq!(pull((0.0, 0.0), RIGHT, &at), Some(0));
+    }
+
+    #[test]
+    fn nothing_behind_and_nothing_sideways() {
+        let behind = [(-50.0, 0.0), (-10.0, -10.0)];
+        assert_eq!(pull((0.0, 0.0), RIGHT, &behind), None);
+        assert_eq!(pull((0.0, 0.0), LEFT, &behind), Some(1));
+        // Straight down from here is not to the right of here.
+        assert_eq!(pull((0.0, 0.0), RIGHT, &[(0.0, 40.0)]), None);
+    }
+
+    #[test]
+    fn an_empty_window_has_nowhere_to_step() {
+        assert_eq!(pull((0.0, 0.0), DOWN, &[]), None);
+    }
+}
