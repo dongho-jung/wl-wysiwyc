@@ -534,6 +534,7 @@ pub fn run(
     // from here. Compared against itself rather than against where it was
     // last sent, so that the compositor lagging a step behind cannot read as
     // a hand on the mouse.
+    let mut pushing = false;
     let mut resting: Option<(f64, f64)> = None;
     let mut looked = Instant::now();
     let mut painted = Instant::now();
@@ -718,10 +719,24 @@ pub fn run(
             let thrust = app.thrust();
             if thrust != (0.0, 0.0) {
                 app.flying = true;
+                pushing = true;
                 match drift.as_mut() {
                     Some(d) => d.to = None,
                     None => {
                         drift = Some(Drift::new(pointer_at.unwrap_or_default(), None));
+                    }
+                }
+            } else if pushing {
+                // The key came up. Letting the pointer coast from here is
+                // what makes a hold feel like it is still being held after
+                // it has been let go of, so it lands instead: whatever is
+                // nearest to where it was going to end up gets it, which
+                // keeps the speed it had meaning something without leaving
+                // it drifting.
+                pushing = false;
+                if let Some(d) = drift.as_mut() {
+                    if let Some(at) = app.landing(d.at, d.vel) {
+                        d.to = Some(at);
                     }
                 }
             }
@@ -1327,6 +1342,31 @@ impl App {
         }
     }
 
+    /// Where a flight should end, given where the pointer is and how fast it
+    /// is going: whatever sits nearest to where it would have coasted to,
+    /// with what is off to the side of the way it was going counting against
+    /// it, so that letting go of right lands along the row rather than on
+    /// whatever happens to be closest to a point in space.
+    fn landing(&self, at: (f64, f64), vel: (f64, f64)) -> Option<(f64, f64)> {
+        /// What a pixel to the side of the travel costs.
+        const ASTRAY: f64 = 1.6;
+        let speed = vel.0.hypot(vel.1);
+        if speed < 1.0 {
+            return self.nearest(at).map(|(_, p, _)| p);
+        }
+        let (dx, dy) = (vel.0 / speed, vel.1 / speed);
+        let drag = config::get().pointer.drag.max(0.1);
+        let stop = (at.0 + vel.0 / drag, at.1 + vel.1 / drag);
+        self.targets()
+            .into_iter()
+            .map(|(_, p)| {
+                let astray = ((p.0 - at.0) * dy - (p.1 - at.1) * dx).abs();
+                ((p.0 - stop.0).hypot(p.1 - stop.1) + ASTRAY * astray, p)
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, p)| p)
+    }
+
     /// Whatever the pointer is nearest, and how far off it is.
     fn nearest(&self, at: (f64, f64)) -> Option<(Target, (f64, f64), f64)> {
         self.targets()
@@ -1626,12 +1666,20 @@ fn pull(from: Rect, (dx, dy): (f64, f64), boxes: &[Rect], reach: f64) -> Option<
         false if dx != 0.0 => (r.x as f64, (r.x + r.w) as f64),
         false => (r.y as f64, (r.y + r.h) as f64),
     };
-    let ahead = |r: &Rect| {
-        let mid = |r: &Rect| ((r.x + r.w / 2.0) as f64 * dx) + ((r.y + r.h / 2.0) as f64 * dy);
-        mid(r) - mid(&from) > 2.0
+    // That way means starting further that way, by the edge nearest the
+    // press and not by the middle. A label and the field beside it are a row
+    // apart in their middles and a hand's width apart in their edges: going
+    // by middles, the label below wins a press of right, which is how right
+    // ends up meaning down.
+    let edge = |r: &Rect| match (dx > 0.0, dy > 0.0, dx != 0.0) {
+        (true, _, true) => r.x as f64,
+        (false, _, true) => -((r.x + r.w) as f64),
+        (_, true, false) => r.y as f64,
+        (_, false, false) => -((r.y + r.h) as f64),
     };
+    let ahead = |r: &Rect| edge(r) >= edge(&from) + 4.0;
 
-    boxes
+    let best = boxes
         .iter()
         .enumerate()
         .filter_map(|(i, r)| {
@@ -1642,7 +1690,38 @@ fn pull(from: Rect, (dx, dy): (f64, f64), boxes: &[Rect], reach: f64) -> Option<
                 .then_some((along + ACROSS * across, i))
         })
         .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, i)| i)
+        .map(|(_, i)| i);
+    if best.is_some() || dx != 0.0 {
+        return best;
+    }
+
+    // Nothing below, or above, that is also in line. In a paragraph that is
+    // the usual case rather than the odd one: the links are wherever the
+    // words fell, so the one on the next line is rarely under the one on
+    // this line, and a rule about being in line has down doing nothing at
+    // all. What down means there is the next one along, so take that: the
+    // first thing on a later line, reading the way the text does.
+    let (top, bottom) = (from.y as f64, (from.y + from.h) as f64);
+    boxes
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            let (rt, rb) = (r.y as f64, (r.y + r.h) as f64);
+            match dy > 0.0 {
+                true => rt >= bottom - 1.0 && rt - bottom <= reach,
+                false => rb <= top + 1.0 && top - rb <= reach,
+            }
+        })
+        .min_by(|(_, a), (_, b)| {
+            let key = |r: &Rect| match dy > 0.0 {
+                true => (r.y as f64, r.x as f64),
+                // Reading backwards: the last thing on the line above.
+                false => (-(r.y + r.h) as f64, -(r.x + r.w) as f64),
+            };
+            let (a, b) = (key(a), key(b));
+            a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+        })
+        .map(|(i, _)| i)
 }
 
 /// Label a window's elements and place them in global coordinates.

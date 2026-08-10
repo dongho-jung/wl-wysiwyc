@@ -1,0 +1,9 @@
+<!doctype html><meta charset=utf-8><title>nav: prose</title>
+<style>body{font:14px/2.1 system-ui;margin:24px;max-width:620px}a{color:#06c}</style>
+<h3>links inside running text</h3>
+<p><script>
+ const w=('the quick brown fox jumps over a lazy dog while the compositor hands out labels and the pointer '+
+  'drifts between them looking for something to click on before the page changes again and again until '+
+  'the reader gives up and reaches for the mouse instead of the keyboard').split(' ');
+ w.forEach((x,i)=>document.write(i%3==1?`<a href=#p${i}>${x}</a> `:x+' '))
+</script></p>

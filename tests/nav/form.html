@@ -1,0 +1,10 @@
+<!doctype html><meta charset=utf-8><title>nav: form</title>
+<style>body{font:13px system-ui;margin:24px}
+form{display:grid;grid-template-columns:90px 220px 90px 220px;gap:9px 14px;align-items:center}
+input,select{padding:3px 5px;border:1px solid #ccc;width:100%}a{color:#06c}.wide{grid-column:2/5}</style>
+<h3>two columns, labels and fields</h3>
+<form><script>
+ ['Name','Region','Owner','Plan','Contact','Tier','Domain','Quota','Team','Scope'].forEach((n,i)=>
+  document.write(`<label><a href=#f${i}>${n}</a></label><input value="${n.toLowerCase()}">`));
+ document.write('<label><a href=#fw>Notes</a></label><input class=wide value="a wider field">')
+</script></form>

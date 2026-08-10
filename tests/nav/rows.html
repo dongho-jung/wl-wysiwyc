@@ -1,0 +1,12 @@
+<!doctype html><meta charset=utf-8><title>nav: rows</title>
+<style>body{font:13px system-ui;margin:24px}a{color:#06c}
+.tb a{display:inline-block;border:1px solid #ccc;padding:2px 6px;margin-right:2px;font-size:11px}
+.wide a{display:inline-block;border:1px solid #999;padding:14px 34px;margin:14px 10px 0 0}
+.mix a{display:inline-block;border:1px solid #bbb;margin:3px}
+.s{padding:1px 3px;font-size:10px}.m{padding:7px 16px}.l{padding:20px 40px;font-size:17px}</style>
+<h3>a dense toolbar row</h3>
+<div class=tb><script>for(let i=0;i<20;i++)document.write(`<a href=#t${i}>T${i}</a>`)</script></div>
+<h3>a row of wide buttons</h3>
+<div class=wide><script>for(let i=0;i<6;i++)document.write(`<a href=#w${i}>wide ${i}</a>`)</script></div>
+<h3>a row of mixed heights</h3>
+<div class=mix><script>['s','l','m','s','m','l','s','m'].forEach((c,i)=>document.write(`<a class=${c} href=#m${i}>M${i}</a>`))</script></div>

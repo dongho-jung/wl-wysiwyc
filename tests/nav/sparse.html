@@ -1,0 +1,9 @@
+<!doctype html><meta charset=utf-8><title>nav: sparse</title>
+<style>body{font:13px system-ui;margin:24px;height:1100px;position:relative}
+a{position:absolute;border:1px solid #999;border-radius:5px;padding:16px 30px;color:#06c}</style>
+<h3>a few, far apart, with one tight cluster</h3>
+<script>
+ [[60,80],[520,120],[120,420],[600,520],[300,860],[700,900]].forEach(([x,y],i)=>
+   document.write(`<a style="left:${x}px;top:${y}px" href=#s${i}>spread ${i}</a>`));
+ for(let i=0;i<6;i++) document.write(`<a style="left:${330+i*54}px;top:${300+ (i%2)*26}px;padding:2px 6px" href=#k${i}>k${i}</a>`)
+</script>
