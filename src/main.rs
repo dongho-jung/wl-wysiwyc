@@ -35,6 +35,12 @@ Usage:
                              KEYS is a run of presses: all but the last
                              confirmed, the last one armed, or all of them
                              with a trailing dot (debugging aid)
+  wl-wysiwyc --drill SCRIPT [N]
+                             put the overlay through a run of key presses on
+                             the focused window and say where the pointer
+                             went: down:70 wait:400 right:250 presses down
+                             for 70ms, waits, then holds right. Nothing is
+                             clicked and no keys are taken (debugging aid)
   wl-wysiwyc --keys          print the keys the overlay would bind and what
                              each one does, without showing anything
   wl-wysiwyc --reset         leave the key submap, for when a run was killed
@@ -84,6 +90,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         Some("--render") => {
             let path = args.get(1).ok_or("--render needs a file to write")?;
             render(path, opt_window(2)?, args.get(3).map_or("", String::as_str))
+        }
+        Some("--drill") => {
+            let script = args.get(1).ok_or("--drill needs a run of key presses")?;
+            drill(script, opt_window(2)?)
         }
         Some("--keys") => keys(),
         Some("--reset") => {
@@ -245,14 +255,30 @@ fn cancel_running() -> bool {
 }
 
 fn interactive(smoke: Option<overlay::Smoke>) -> Result<(), Box<dyn Error>> {
-    if smoke.is_none() && cancel_running() {
+    run_overlay(smoke, None)
+}
+
+/// Put the overlay through a run of key presses and say where the pointer
+/// went. Nothing is clicked and no keys are taken; this is for measuring how
+/// navigating feels against a real window's labels.
+fn drill(script: &str, win: Option<usize>) -> Result<(), Box<dyn Error>> {
+    let mut steps = overlay::Drill::parse(script)?;
+    steps.win = win;
+    run_overlay(None, Some(steps))
+}
+
+fn run_overlay(
+    smoke: Option<overlay::Smoke>,
+    drill: Option<overlay::Drill>,
+) -> Result<(), Box<dyn Error>> {
+    if smoke.is_none() && drill.is_none() && cancel_running() {
         return Ok(());
     }
     let snap = hypr::snapshot()?;
     if snap.windows.is_empty() {
         return Err("no windows on the active workspace".into());
     }
-    if let Some((x, y)) = overlay::run(snap, smoke)? {
+    if let Some((x, y)) = overlay::run(snap, smoke, drill)? {
         println!("clicked at ({x:.0}, {y:.0})");
     }
     Ok(())

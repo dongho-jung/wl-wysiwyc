@@ -59,6 +59,11 @@ const CATCH: f64 = 300.0;
 /// behind the pointer can have it as well as what is in front.
 const CRAWL: f64 = 45.0;
 
+/// How long an arrow key has to be down before it stops being a press and
+/// starts being a hold: past this the pointer is flown rather than sent to
+/// the next target along.
+const HOLD: Duration = Duration::from_millis(200);
+
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 
@@ -100,6 +105,48 @@ pub enum SmokeView {
 pub struct Smoke {
     pub duration: Duration,
     pub view: SmokeView,
+}
+
+/// A run of key presses to put the overlay through, with the pointer's every
+/// step written down.
+///
+/// Navigation is a feel, and a feel cannot be argued about from a distance:
+/// what a press does depends on where every label is, how fast a frame takes
+/// to paint, and how long a key was down for. This drives the real overlay
+/// over the real labels of a real window and says where the pointer went, so
+/// that tuning any of it is measuring rather than guessing.
+pub struct Drill {
+    /// What to press, how long to hold it, in order.
+    pub steps: Vec<(Key, Duration)>,
+    /// Which window to run it on, 1-based, or the focused one.
+    pub win: Option<usize>,
+}
+
+impl Drill {
+    /// `down:70 wait:400 q:60` and so on: a key and how long it is held, or
+    /// a wait with nothing held. Bare names hold for 70ms.
+    pub fn parse(script: &str) -> Result<Drill, String> {
+        let mut steps = Vec::new();
+        for word in script.split([' ', ',']).filter(|w| !w.is_empty()) {
+            let (name, ms) = word.split_once(':').unwrap_or((word, "70"));
+            let ms: u64 = ms.parse().map_err(|_| format!("{word}: not a duration"))?;
+            let key = match name {
+                "wait" => Key::Char('\0'),
+                "left" => Key::Left,
+                "right" => Key::Right,
+                "up" => Key::Up,
+                "down" => Key::Down,
+                "esc" | "escape" => Key::Escape,
+                "tab" => Key::Tab,
+                "space" => Key::Char(' '),
+                "click" => Key::LeftClick,
+                one if one.chars().count() == 1 => Key::Char(one.chars().next().unwrap()),
+                other => return Err(format!("{other}: not a key")),
+            };
+            steps.push((key, Duration::from_millis(ms)));
+        }
+        Ok(Drill { steps, win: None })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -146,12 +193,20 @@ impl Drift {
     /// time, and say whether it has come to rest.
     fn step(&mut self, thrust: (f64, f64), wall: (f64, f64)) -> bool {
         let now = Instant::now();
-        // A step longer than this is the loop having been held up elsewhere.
-        // Integrating it in one go would fling the pointer across the screen,
-        // so it is taken as a short step instead.
-        let dt = (now - self.stepped).as_secs_f64().min(0.03);
+        // However long the loop took to come back, the motion is worked out
+        // in short steps. Taking a long gap in one go would fling the pointer
+        // across the screen; taking it as a short one would lose the push
+        // that happened during it, which is what makes a tap while the
+        // overlay is busy repainting come out as barely a nudge.
+        let mut left = (now - self.stepped).as_secs_f64().min(0.12);
         self.stepped = now;
-        self.advance(dt, thrust, wall)
+        let mut done = false;
+        while left > 0.0 {
+            let dt = left.min(0.008);
+            left -= dt;
+            done = self.advance(dt, thrust, wall);
+        }
+        done
     }
 
     /// The step itself, given how long it is. Apart from the clock this is
@@ -336,7 +391,11 @@ impl Query {
 /// Show the overlay and return the chosen global click position, or None
 /// if the user cancelled. The click itself is performed here as well,
 /// after the overlay is torn down.
-pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, Box<dyn Error>> {
+pub fn run(
+    snap: Snapshot,
+    smoke: Option<Smoke>,
+    drill: Option<Drill>,
+) -> Result<Option<(f64, f64)>, Box<dyn Error>> {
     // A 1-based window number from the command line, the focused window when
     // there is none, and the focused window again when the number is out of
     // range.
@@ -344,6 +403,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         Some(n) if n >= 1 && n <= snap.windows.len() => n - 1,
         _ => snap.focused,
     };
+    let drill_on = drill.as_ref().and_then(|d| d.win);
     let (stage, pending_pick) = match smoke.as_ref().map(|s| &s.view) {
         Some(SmokeView::Picker) => (Stage::PickWindow, None),
         Some(SmokeView::Grid(n)) => (
@@ -353,7 +413,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             None,
         ),
         Some(SmokeView::Hints(n)) => (Stage::PickWindow, Some(window_or_focused(*n))),
-        None => (Stage::PickWindow, Some(snap.focused)),
+        None => (Stage::PickWindow, Some(window_or_focused(drill_on))),
     };
 
     // Ask the window for its elements before doing anything else. It is the
@@ -444,15 +504,17 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
     // Keys come from the compositor as global shortcuts when it speaks that
     // protocol. Holding the keyboard ourselves is the fallback, and it costs
     // the window its activation, which costs it any menu open on hover.
-    let shortcuts = match smoke {
-        Some(_) => None,
-        None => Shortcuts::bind(&globals, &qh),
+    let shortcuts = match smoke.is_some() || drill.is_some() {
+        true => None,
+        false => Shortcuts::bind(&globals, &qh),
     };
-    layer.set_keyboard_interactivity(if smoke.is_some() || shortcuts.is_some() {
-        KeyboardInteractivity::None
-    } else {
-        KeyboardInteractivity::Exclusive
-    });
+    layer.set_keyboard_interactivity(
+        if smoke.is_some() || drill.is_some() || shortcuts.is_some() {
+            KeyboardInteractivity::None
+        } else {
+            KeyboardInteractivity::Exclusive
+        },
+    );
     layer.commit();
     app.layer = Some(layer);
 
@@ -474,6 +536,30 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
     // a hand on the mouse.
     let mut resting: Option<(f64, f64)> = None;
     let mut looked = Instant::now();
+    let mut painted = Instant::now();
+
+    // A drill presses its own keys on a schedule and says what happened.
+    let drilling = drill.is_some();
+    let mut script = drill.map(|d| d.steps.into_iter()).into_iter().flatten();
+    let mut pending: Option<(Key, Instant)> = None;
+    let mut next_step = Instant::now() + Duration::from_millis(400);
+    let mut step_no = 0usize;
+    let mut settling: Option<Instant> = None;
+    // Where the pointer has come to rest, and on what.
+    let where_now = |app: &App, at: (f64, f64)| {
+        let label = match app.lit {
+            Some(Target::Hint(i)) => app.hints.get(i).map(|h| h.label.clone()),
+            Some(Target::Tile(c)) => Some(c.to_string()),
+            None => None,
+        };
+        format!(
+            "({:.0},{:.0}) on {}",
+            at.0,
+            at.1,
+            label.unwrap_or_else(|| "nothing".into())
+        )
+    };
+    let mut was: Option<((f64, f64), String)> = None;
 
     if let Some(smoke) = &smoke {
         let start = Instant::now();
@@ -529,6 +615,64 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             }
             queue.dispatch_pending(&mut app)?;
             app.process_pending_pick();
+            if drilling {
+                let now = Instant::now();
+                // However the script goes, a drill ends.
+                if start.elapsed() > Duration::from_secs(30) {
+                    eprintln!("drill: ran out of time");
+                    app.exit = true;
+                }
+                // Let go of whatever is being held once its time is up.
+                if let Some((key, until)) = pending {
+                    if now >= until {
+                        app.release(key);
+                        pending = None;
+                        next_step = now + Duration::from_millis(600);
+                    }
+                }
+                // And take the next step when the last one has settled.
+                if pending.is_none() && now >= next_step {
+                    match script.next() {
+                        Some((Key::Char('\0'), how_long)) => {
+                            next_step = now + how_long;
+                        }
+                        Some((key, how_long)) => {
+                            step_no += 1;
+                            let at = pointer_at.unwrap_or_default();
+                            let now_at = where_now(&app, at);
+                            match was.take() {
+                                Some((before, what)) => eprintln!(
+                                    "  landed {now_at}, {:.0}px on{}",
+                                    (at.0 - before.0).hypot(at.1 - before.1),
+                                    if what == now_at { " (same place)" } else { "" }
+                                ),
+                                None => eprintln!("  start at {now_at}"),
+                            }
+                            eprintln!("step {step_no}: {key:?} held {}ms", how_long.as_millis());
+                            was = Some((at, now_at));
+                            app.press(key);
+                            pending = Some((key, now + how_long));
+                        }
+                        None if settling.is_none() => {
+                            settling = Some(now + Duration::from_millis(500));
+                        }
+                        None => {
+                            if settling.is_some_and(|at| now >= at) {
+                                let at = pointer_at.unwrap_or_default();
+                                let now_at = where_now(&app, at);
+                                if let Some((before, what)) = was.take() {
+                                    eprintln!(
+                                        "  landed {now_at}, {:.0}px on{}",
+                                        (at.0 - before.0).hypot(at.1 - before.1),
+                                        if what == now_at { " (same place)" } else { "" }
+                                    );
+                                }
+                                app.exit = true;
+                            }
+                        }
+                    }
+                }
+            }
             if let (Some(wheel), Some(vp)) = (app.scroll.take(), pointer.as_ref()) {
                 send_scroll(vp, wheel);
                 queue.flush()?;
@@ -573,6 +717,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             // point.
             let thrust = app.thrust();
             if thrust != (0.0, 0.0) {
+                app.flying = true;
                 match drift.as_mut() {
                     Some(d) => d.to = None,
                     None => {
@@ -588,6 +733,18 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
                 let extent = app.snap.layout_extent;
                 let wall = ((extent.0 - 1) as f64, (extent.1 - 1) as f64);
                 let mut done = d.step(thrust, wall);
+                if std::env::var_os("WL_TRACE").is_some() {
+                    eprintln!(
+                        "t={:?} thrust={:?} at=({:.0},{:.0}) v=({:.0},{:.0}) to={:?}",
+                        start.elapsed().as_millis(),
+                        thrust,
+                        d.at.0,
+                        d.at.1,
+                        d.vel.0,
+                        d.vel.1,
+                        d.to.map(|t| (t.0 as i32, t.1 as i32))
+                    );
+                }
                 // Slowing down with nothing holding it: something near enough
                 // catches it and the spring reels it the rest of the way in.
                 //
@@ -647,7 +804,15 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
                 }
             }
             if !app.exit && app.configured && app.dirty {
-                app.draw();
+                // A whole output takes long enough to paint that painting one
+                // between two steps of a flight is most of the time the
+                // flight had to move in. While the pointer is going, the
+                // labels keep up as often as they can afford to.
+                let spare = drift.is_none() || painted.elapsed() > Duration::from_millis(55);
+                if spare {
+                    painted = Instant::now();
+                    app.draw();
+                }
             }
         }
     }
@@ -1081,27 +1246,56 @@ impl App {
         // held is a release that went missing, and leaving the old stamp
         // there would leave that direction dead.
         self.held[which] = down.then(Instant::now);
-        if already == down {
+        if already == down || !down {
             return;
         }
-        if down {
-            self.fresh = false;
-            self.flying = true;
-            self.typed.clear();
-            self.armed = None;
-            self.charge = None;
-            self.dirty = true;
+        self.fresh = false;
+        self.dirty |= !self.typed.is_empty() || self.armed.is_some();
+        self.typed.clear();
+        self.armed = None;
+        self.charge = None;
+        // A press is worth the next target that way, whatever the distance.
+        // Holding takes over from there, but a tap has to land somewhere: a
+        // push of its own would be a nudge in an open stretch and three
+        // targets in a crowded one.
+        self.hop(Self::WAYS[which]);
+    }
+
+    /// The four directions, in the order the keys are held in.
+    const WAYS: [(f64, f64); 4] = [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)];
+
+    /// Send the pointer to the next target that way.
+    fn hop(&mut self, way: (f64, f64)) {
+        let here = self.picked.map(|(p, _)| p);
+        let from = match self.picked {
+            Some((_, at)) => at,
+            None => match hypr::cursor_pos() {
+                Some(at) => at,
+                None => return,
+            },
+        };
+        let targets: Vec<(Target, (f64, f64))> = self
+            .targets()
+            .into_iter()
+            .filter(|&(what, _)| here != Some(what))
+            .collect();
+        let points: Vec<(f64, f64)> = targets.iter().map(|&(_, at)| at).collect();
+        if let Some(i) = pull(from, way, &points, config::get().pointer.reach_px) {
+            let (what, at) = targets[i];
+            self.focus(what, at);
         }
     }
 
-    /// Which way the keys being held are pushing, as a unit vector.
+    /// Which way the keys still held are pushing, as a unit vector.
     ///
-    /// A key held for longer than it takes to cross a screen has not been
-    /// let go of: the release was lost somewhere, and the pointer should
-    /// stop rather than fly on into a corner.
+    /// Only keys held past the point where they stopped being a press: a tap
+    /// has already had its hop, and pushing as well would take the pointer
+    /// somewhere past it. A key held for longer than it takes to cross a
+    /// screen has not been let go of at all, and stops counting.
     fn thrust(&self) -> (f64, f64) {
         let down = |i: usize| {
-            self.held[i].is_some_and(|since| since.elapsed() < Duration::from_millis(1200))
+            self.held[i]
+                .is_some_and(|since| (HOLD..Duration::from_millis(1200)).contains(&since.elapsed()))
         };
         let axis = |less: usize, more: usize| f64::from(down(more)) - f64::from(down(less));
         let (x, y) = (axis(0, 1), axis(2, 3));
@@ -1378,6 +1572,41 @@ impl App {
         surface.damage_buffer(0, 0, bw, bh);
         surface.commit();
     }
+}
+
+/// Which of these points a step in a direction should land on.
+///
+/// Whichever pulls hardest, which is mostly whichever is nearest: a step is
+/// meant to land on the next thing over, and ranking by how well something
+/// lines up is what reaches past three of them for a fourth. Being off the
+/// line counts against a target too, enough to keep a row or a column
+/// reading straight when the choice is otherwise close.
+///
+/// Nothing further off than `reach` counts at all. Every layout has edges,
+/// and at one of them the next thing that way can be the far side of the
+/// window: answering a press meaning "the next one down" with a jump across
+/// the screen is worse than answering it with nothing, and holding the key
+/// flies there under your own hand anyway.
+fn pull(from: (f64, f64), (dx, dy): (f64, f64), at: &[(f64, f64)], reach: f64) -> Option<usize> {
+    /// What a pixel off the line costs, against a pixel of plain distance.
+    const ACROSS: f64 = 1.8;
+    /// How far off the line is still that way at all: forty degrees either
+    /// side. Anything wider is not what the key meant. Pressing right and
+    /// travelling mostly upwards is worse than pressing right and staying
+    /// put, even where staying put is all there is.
+    const CONE: f64 = 0.84;
+    at.iter()
+        .enumerate()
+        .filter_map(|(i, &(x, y))| {
+            let (ox, oy) = (x - from.0, y - from.1);
+            let along = ox * dx + oy * dy;
+            let across = (ox * dy - oy * dx).abs();
+            let away = along.hypot(across);
+            (along > 2.0 && across <= CONE * along && away <= reach)
+                .then_some((away + ACROSS * across, i))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, i)| i)
 }
 
 /// Label a window's elements and place them in global coordinates.

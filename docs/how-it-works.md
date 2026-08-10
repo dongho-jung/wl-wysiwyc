@@ -177,28 +177,36 @@ The overlay opens with the target already on whatever the pointer is
 nearest, so a click can need no typing at all, and the arrow keys move
 it from there.
 
-The arrow keys do not move it from one target to the next. They push
-the pointer, for as long as they are held, and it has weight: a tap
-gets it going and it coasts to a stop a target or two along, a hold
-builds speed until drag balances the push and carries it across the
-window, and two keys at once push diagonally. `pointer.accel_px` is the
-push and `pointer.drag` is what slows it, which between them set how
-fast it can go.
+An arrow key means two things, and which one depends on how long it is
+held. A press is worth the next target that way: within forty degrees
+of the line, nearest first, and no further off than `pointer.reach_px`.
+A press has to land somewhere, and a push of its own would be a nudge
+in an open stretch and three targets in a crowded one, so the press
+names the target and the pointer is pulled to it.
 
-Whatever it is over is what is picked, moment to moment, so the choice
-follows the pointer rather than being decided when the key went down.
-As it slows, something within `pointer.snap_px` catches it and reels it
-the rest of the way in, on a spring damped just under the point where
-it would stop dead. That is what makes it land on a target rather than
-between two.
+Held past `HOLD`, a fifth of a second, it stops being a press and
+starts being a push. The pointer has weight: it builds speed while the
+key is down until drag balances the push, coasts when it is let go, and
+two keys at once push diagonally. `pointer.accel_px` is the push and
+`pointer.drag` is what slows it, which between them set how fast it can
+go. While it is being flown, whatever it is over is what is picked,
+moment to moment, so the choice follows the pointer.
 
-Only something it is heading towards can catch it, until it has all but
-stopped. The target it has just left is still well within reach for the
-first stretch of a light push, and would otherwise take it straight
-back, which looks like the push having done nothing. And if it comes to
-rest having been caught by nothing, whatever is nearest gets it from
-four times as far: resting between two labels leaves the pointer
-nowhere, and being somewhere is the point of it.
+As a flight slows, something within `pointer.snap_px` catches it and
+reels it the rest of the way in, on a spring damped just under the
+point where it would stop dead. Only something it is heading towards,
+until it has all but stopped: the target it has just left is still well
+within reach and would otherwise take it straight back. And if it comes
+to rest having been caught by nothing, whatever is nearest gets it from
+four times as far, since resting between two labels leaves the pointer
+nowhere.
+
+Both halves refuse to jump. A press finds nothing beyond `reach_px` and
+does nothing at all, which at the end of a row or the bottom of a
+column is the honest answer: every layout has edges, and answering
+"the next one down" with a leap across the window is worse than
+answering it with nothing. Holding the key flies there instead, under
+your own hand.
 
 Two things stop a flight that will not stop itself. It cannot pass the
 edge of the screen: running off one leaves the pointer parked against
@@ -422,6 +430,25 @@ extent, then a left button press and release.
 - `--keys` prints every shortcut the overlay registers and the keys the
   submap presses it with, one line each. What a config did to the keys,
   without opening the overlay to find out.
+- `--drill SCRIPT [N]` presses its own keys on the overlay and says
+  where the pointer went: `--drill "down:60 wait:300 down:60" 2` taps
+  down twice on window 2 and prints what each press landed on and how
+  far it moved. It takes no keyboard and binds no submap, and clicks
+  nothing. `tests/navigation.html` is a page built to be hard for it:
+  a dense chrome row, a sidebar, cards, a form, running text with
+  links in it, a wide table, wrapped chips, a cluster of tiny icons,
+  overlapping boxes, and targets spread far apart. Open it in a browser
+  and drill against it; every press should move by one target, and the
+  numbers say whether it did:
+
+  ```
+  page sidebar, 5 taps down     34px 34px 34px 34px 34px
+  icon grid, 4 taps right       44px 44px 45px 46px
+  right at the window edge      0px SAME 0px SAME
+  ```
+
+  `WL_TRACE=1` adds a line per frame of the pointer's own motion, which
+  is how the timing of the flight itself gets looked at.
 - `--move-test X Y` moves the cursor to global (X, Y) through the
   virtual pointer without clicking. Verifies coordinate mapping.
 

@@ -64,6 +64,11 @@ pointer:
   # is also how precisely it can be flown between two of them.
   snap_px: 70
 
+  # How far a tap of an arrow key looks for the next target that way.
+  # Past this it does nothing rather than throw the pointer across the
+  # window; hold the key to fly there instead.
+  reach_px: 260
+
   # About how long the pointer takes to reach a target it was sent to
   # by name, by typing a hint. It is pulled there rather than put there,
   # so this sets how hard the pull is rather than timing the trip.
