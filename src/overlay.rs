@@ -132,18 +132,10 @@ struct Charge {
 }
 
 impl Charge {
-    /// How far into the hold this is, from 0 at the press to 1 at the last
-    /// step, and how many clicks it stands at now.
-    fn at(&self) -> (f32, u32) {
-        let cfg = &config::get().click;
-        let span = cfg.span().as_secs_f32();
-        let held = self.started.elapsed();
-        let t = if span > 0.0 {
-            (held.as_secs_f32() / span).clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        (t, cfg.clicks(held))
+    /// How many clicks the hold stands at, and how far along it is to the
+    /// next one.
+    fn at(&self) -> (u32, f32) {
+        config::get().click.stage(self.started.elapsed())
     }
 }
 
@@ -199,6 +191,8 @@ struct App {
     /// window again once the scrolling stops.
     scroll: Option<Wheel>,
     settle: Option<Instant>,
+    /// Says when the window moved under the overlay, wheel or otherwise.
+    watch: Option<std::sync::mpsc::Receiver<()>>,
     /// With `keys.confirm` on, a key pressed once and not taken yet: it shows
     /// what it would select, and pressing it again takes it.
     armed: Option<char>,
@@ -322,6 +316,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         charge: None,
         scroll: None,
         settle: None,
+        watch: None,
         armed: None,
         picked: None,
         elements_cache: HashMap::new(),
@@ -411,6 +406,10 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             if let Some(guard) = queue.prepare_read() {
                 let wait = if glide.is_some() || app.settle.is_some() {
                     Duration::from_millis(8)
+                } else if app.watch.is_some() {
+                    // Often enough to catch a scroll that went past the
+                    // overlay; the check itself is one message.
+                    Duration::from_millis(60)
                 } else if app.charging() {
                     // A held key is drawn, not moved, so it wants frames
                     // rather than pointer steps: often enough to look like a
@@ -436,6 +435,11 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             if let (Some(wheel), Some(vp)) = (app.scroll.take(), pointer.as_ref()) {
                 send_scroll(vp, wheel);
                 queue.flush()?;
+            }
+            // Someone scrolled the window without going through the overlay,
+            // which the hints have no way of knowing on their own.
+            if app.watch.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
+                app.shifted();
             }
             // Everything has moved, so the hints have to be read again. Once
             // the scrolling stops, not on every press of a key held down.
@@ -638,13 +642,24 @@ impl App {
             return;
         }
         self.scroll = Some(wheel);
+        self.shifted();
+    }
+
+    /// The window moved under the overlay: the labels name where things were.
+    /// Drop them and read again once it stops moving.
+    fn shifted(&mut self) {
+        if matches!(self.stage, Stage::PickWindow) {
+            return;
+        }
         self.settle = Some(Instant::now() + config::get().scroll.settle());
-        self.hints.clear();
-        self.typed.clear();
-        self.armed = None;
-        self.picked = None;
-        self.charge = None;
-        self.dirty = true;
+        if !self.hints.is_empty() {
+            self.hints.clear();
+            self.typed.clear();
+            self.armed = None;
+            self.picked = None;
+            self.charge = None;
+            self.dirty = true;
+        }
     }
 
     /// Read the window again, now that the scrolling has stopped.
@@ -1058,7 +1073,19 @@ impl App {
 
     fn enter_hint_stage(&mut self, win: usize) {
         let els = self.elements_cache.get(&win).cloned().unwrap_or_default();
-        self.hints = hints_for(&self.snap.windows[win], &els);
+        // Watch whatever sits nearest the middle of the window. The chrome
+        // around a page does not move when the page scrolls, and the middle
+        // is the part least likely to be chrome.
+        let w = &self.snap.windows[win];
+        let (mx, my) = (w.w as f64 / 2.0, w.h as f64 / 2.0);
+        self.watch = els
+            .iter()
+            .min_by(|a, b| {
+                let d = |e: &Element| (e.x - mx).powi(2) + (e.y - my).powi(2);
+                d(a).total_cmp(&d(b))
+            })
+            .and_then(atspi::watch_bounds);
+        self.hints = hints_for(w, &els);
         self.stage = Stage::PickHint { win };
         self.reset_input();
     }
@@ -1239,8 +1266,8 @@ pub fn render(
             (h.rh * scale as f64) as f32,
         );
         let cfg = &config::get().click;
-        let clicks = cfg.clicks(cfg.span().mul_f32(t.clamp(0.0, 1.0)));
-        draw_charge(&mut canvas, el, (t.clamp(0.0, 1.0), clicks), scale as f32);
+        let stage = cfg.stage(cfg.span().mul_f32(t.clamp(0.0, 1.0)));
+        draw_charge(&mut canvas, el, stage, scale as f32);
     }
     Ok((buf, bw, bh))
 }
@@ -1602,42 +1629,62 @@ fn draw_pick_hint(
     }
 }
 
-/// The fill that runs while a click key is held: how far into the hold it is,
-/// and where the next click waits. A thin bar under the target, since the
-/// point is to glance at it, not to watch it.
-fn draw_charge(canvas: &mut Canvas, el: Rect, (t, clicks): (f32, u32), s: f32) {
+/// The charge on a held click key: what it has stored up, and what is coming.
+///
+/// A ring gathers in on the target as the step fills and lands on it when the
+/// count goes up, the target's own outline thickens and glows with what is
+/// stored, and a row of pips underneath says how many clicks that is, since a
+/// glow on its own cannot be counted.
+fn draw_charge(canvas: &mut Canvas, el: Rect, (level, frac): (u32, f32), s: f32) {
     let cfg = config::get();
-    let h = 4.0 * s;
-    let w = el.w.clamp(52.0 * s, 180.0 * s);
-    let x = el.x + (el.w - w) / 2.0;
-    // Under the target, or above it when the target sits on the bottom edge.
-    let below = el.y + el.h + 6.0 * s;
-    let y = if below + h < canvas.h as f32 {
+    let tone = |n: u32| match n {
+        0 | 1 => *cfg.colors.charge,
+        2 => *cfg.colors.armed,
+        _ => *cfg.colors.ring,
+    };
+    let radius = 5.0 * s;
+    let here = tone(level);
+    let top = cfg.click.levels();
+
+    // What is stored: the target sits inside a ring that grows with it.
+    canvas.round_rect_shadow(el, radius, (7.0 + 4.0 * level as f32) * s, here.fade(0.32));
+    canvas.round_rect_outline(el, radius, (1.2 + 0.8 * level as f32) * s, here);
+
+    // What is coming: a ring closing in, quicker the nearer it gets, so the
+    // moment it lands is the moment the count goes up.
+    if level < top {
+        let ease = frac * frac;
+        let pad = (17.0 - 14.0 * ease) * s;
+        canvas.round_rect_outline(
+            el.grow(pad),
+            radius + pad,
+            (1.0 + 1.8 * ease) * s,
+            tone(level + 1).fade(0.10 + 0.75 * ease),
+        );
+    }
+
+    // How many clicks the hold stands at. Under the target, or over it when
+    // the target sits on the bottom edge.
+    if top < 2 {
+        return;
+    }
+    let (d, gap) = (5.0 * s, 4.0 * s);
+    let wide = top as f32 * d + (top - 1) as f32 * gap;
+    let x0 = el.x + (el.w - wide) / 2.0;
+    let below = el.y + el.h + 8.0 * s;
+    let y = if below + d < canvas.h as f32 {
         below
     } else {
-        el.y - 6.0 * s - h
+        el.y - 8.0 * s - d
     };
-    let track = Rect::new(x, y, w, h);
-    canvas.round_rect_shadow(track, h / 2.0, 4.0 * s, cfg.colors.shadow.fade(0.7));
-    canvas.round_rect(track, h / 2.0, shade(*cfg.colors.charge, 0.25));
-    if t > 0.0 {
-        // The colour steps with the count, so a glance says which click the
-        // hold has reached without counting notches.
-        let fill = match clicks {
-            1 => *cfg.colors.charge,
-            2 => *cfg.colors.armed,
-            _ => *cfg.colors.ring,
+    for i in 0..top {
+        let pip = Rect::new(x0 + i as f32 * (d + gap), y, d, d);
+        canvas.round_rect_shadow(pip, d / 2.0, 3.0 * s, shade(*cfg.colors.shadow, 0.85));
+        let fill = match i < level {
+            true => tone(i + 1),
+            false => shade(*cfg.colors.text, 0.30),
         };
-        canvas.round_rect(Rect::new(x, y, (w * t).max(h), h), h / 2.0, fill);
-    }
-    // A notch at every step, so the bar says where the next click waits
-    // rather than only how long the key has been down.
-    for f in cfg.click.steps() {
-        if f <= 0.0 || f >= 1.0 {
-            continue;
-        }
-        let notch = Rect::new(x + w * f - 0.75 * s, y - 1.0 * s, 1.5 * s, h + 2.0 * s);
-        canvas.round_rect(notch, 0.0, *cfg.colors.dim);
+        canvas.round_rect(pip, d / 2.0, fill);
     }
 }
 

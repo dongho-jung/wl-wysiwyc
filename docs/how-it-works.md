@@ -106,10 +106,12 @@ Holding a click key asks for more of them. The click lands when the key
 comes up, and how long it was down says how many: a tap clicks once,
 past `click.double_ms` twice, past `click.triple_ms` three times. A
 double click made this way is one gesture rather than two presses
-racing a timer. While the key is down a bar fills under the target with
-a notch at each step, and its colour steps with the count, so the wait
-is something to watch. Anything else pressed calls the hold off, which
-is how to back out of one started by mistake.
+racing a timer. While the key is down the charge is drawn on the
+target: a ring gathers in on it as the step fills and lands as the
+count goes up, the target's own outline thickens with what is stored,
+and a pip lights underneath for each click the hold has reached, since
+a glow on its own cannot be counted. Anything else pressed calls the
+hold off, which is how to back out of one started by mistake.
 
 `keys.scroll_up` and `keys.scroll_down` (`;` and `'`) turn the wheel
 over whatever the pointer is on, without leaving the overlay: shift
@@ -119,6 +121,14 @@ pointer input, so the wheel reaches the window underneath exactly as a
 real one would. Scrolling moves everything the hints named, so they go
 as soon as a scroll key is pressed and the window is read again once
 the scrolling settles.
+
+A wheel turned by hand does the same thing without saying so: the
+overlay takes no pointer input, so the scroll goes straight past it and
+the labels are left naming where things were. One element near the
+middle of the window is asked where it is eight times a second, which
+is a single message, and the labels go and come back the same way as
+for a scroll key. The middle is where the answer means something: the
+chrome around a page does not move when the page does.
 
 Shift, ctrl and alt with a click key reach the window as themselves.
 The overlay never takes the keyboard, so the window under it already

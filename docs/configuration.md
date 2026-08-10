@@ -60,11 +60,12 @@ click:
   # how many times: a tap clicks once, holding past double_ms clicks
   # twice, past triple_ms three times. Zero on either turns that step
   # off, so double_ms: 0 leaves every click single.
-  double_ms: 250
-  triple_ms: 550
+  double_ms: 350
+  triple_ms: 800
 
-  # Fill the target while the key is down, with a notch at each step, so
-  # the count is something to watch rather than to time in your head.
+  # Show the charge while the key is down: a ring closing in on the
+  # target as the step fills, and a pip for each click reached, so the
+  # count is watched rather than timed in the head.
   charge: true
 
   # The keyboard the labels are laid out on, so that where something is
@@ -94,7 +95,7 @@ label:
   track: 2.5    # space between a label's characters
 
 colors:
-  dim: "#00000047"          # laid over the output, so labels stand out
+  dim: "#00000000"          # laid over the output; add alpha to darken
   shadow: "#0000006b"       # under every label
   hint: "#fac94ae0"         # a hint waiting to be typed
   hint_text: "#241700"
@@ -103,7 +104,7 @@ colors:
   armed_key: "#053d26eb"    # the armed key, shown pressed in them
   armed_key_text: "#8cffd1"
   ring: "#40eba1f2"         # around the element about to be clicked
-  charge: "#fac94af2"       # the fill under a held click key
+  charge: "#fac94af2"       # the first level of a held click key
   tile: "#14141a33"         # grid tiles
   tile_border: "#ffffff4d"
   text: "#fffffff5"         # grid letters and window numbers
@@ -143,6 +144,9 @@ elements:
   reachable.
 - Labels are slightly transparent on purpose, so a small icon under one
   is still recognisable. End `hint` with `ff` for solid labels.
+- `dim` is transparent by default. The labels carry themselves against
+  most windows, and darkening the screen to read them is a tax on every
+  glance; `#00000047` is the old look if the contrast is wanted.
 - Raising `elements.walk_ms` gets more of a heavy page hinted at the
   cost of a longer pause before the overlay appears. See the limitation
   in [how-it-works.md](how-it-works.md) for why the walk is slow.

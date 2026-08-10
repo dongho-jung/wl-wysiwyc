@@ -1,5 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 use zbus::blocking::Connection;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
@@ -52,7 +53,9 @@ const BATCH: usize = 32;
 /// from its document, and the parent that ratio was measured against.
 type Pending = (String, String, f64, Option<String>);
 
-/// A clickable element, window-relative logical coordinates.
+/// A clickable element, window-relative logical coordinates. The node it came
+/// from is kept so its box can be looked at again later, which is how a
+/// window that scrolls under the overlay is noticed.
 #[derive(Debug, Clone)]
 pub struct Element {
     pub role: u32,
@@ -60,6 +63,8 @@ pub struct Element {
     pub y: f64,
     pub w: f64,
     pub h: f64,
+    pub dest: String,
+    pub path: String,
 }
 
 pub fn role_name(role: u32) -> &'static str {
@@ -229,10 +234,7 @@ fn name_of(conn: &Connection, dest: &str, path: &str) -> Option<String> {
 /// Chromium reports web-content extents in physical pixels while the UI parts
 /// use logical pixels; the ratio is derived at each document-web node from
 /// its own extents versus its parent's and divided back out.
-pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn Error>> {
-    if pid <= 0 {
-        return Err("window has no pid".into());
-    }
+fn bus() -> Result<Connection, Box<dyn Error>> {
     let session = Connection::session()?;
     let addr: String = session
         .call_method(
@@ -244,7 +246,39 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
         )?
         .body()
         .deserialize()?;
-    let conn = zbus::blocking::connection::Builder::address(addr.as_str())?.build()?;
+    Ok(zbus::blocking::connection::Builder::address(addr.as_str())?.build()?)
+}
+
+/// Watch one node's box and say so when it moves.
+///
+/// A window that scrolls under the overlay leaves every hint naming where
+/// something used to be, and nothing tells the overlay that happened: it
+/// takes no pointer input, so the wheel that did it went straight past.
+/// Asking one node where it is, a few times a second, is one round trip and
+/// catches it. The receiver going away is what stops the thread.
+pub fn watch_bounds(el: &Element) -> Option<Receiver<()>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let conn = bus().ok()?;
+    let (dest, path) = (el.dest.clone(), el.path.clone());
+    let mut last = extents_of(&conn, &dest, &path);
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(120));
+        let now = extents_of(&conn, &dest, &path);
+        if now != last {
+            last = now;
+            if tx.send(()).is_err() {
+                return;
+            }
+        }
+    });
+    Some(rx)
+}
+
+pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn Error>> {
+    if pid <= 0 {
+        return Err("window has no pid".into());
+    }
+    let conn = bus()?;
 
     let apps: Vec<(String, OwnedObjectPath)> = conn
         .call_method(
@@ -371,6 +405,8 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
                                 y: ey,
                                 w: ew,
                                 h: eh,
+                                dest: node_dest.clone(),
+                                path: path.clone(),
                             });
                         }
                     }
@@ -424,7 +460,15 @@ mod tests {
     use super::*;
 
     fn el(role: u32, x: f64, y: f64, w: f64, h: f64) -> Element {
-        Element { role, x, y, w, h }
+        Element {
+            role,
+            x,
+            y,
+            w,
+            h,
+            dest: String::new(),
+            path: String::new(),
+        }
     }
 
     const LIST_ITEM: u32 = 32;

@@ -68,8 +68,8 @@ pub struct Click {
 impl Default for Click {
     fn default() -> Self {
         Click {
-            double_ms: 250,
-            triple_ms: 550,
+            double_ms: 350,
+            triple_ms: 800,
             charge: true,
         }
     }
@@ -88,23 +88,30 @@ impl Click {
         }
     }
 
+    /// Which click a hold stands at, and how far along it is to the next
+    /// one. The fill is drawn per step rather than over the whole hold, so
+    /// that the two steps are told apart by watching one thing fill twice
+    /// rather than by guessing at a fraction.
+    pub fn stage(&self, held: std::time::Duration) -> (u32, f32) {
+        let ms = held.as_millis() as f32;
+        let (double, triple) = (self.double_ms as f32, self.triple_ms as f32);
+        match self.clicks(held) {
+            1 if double > 0.0 => (1, (ms / double).clamp(0.0, 1.0)),
+            2 if triple > double => (2, ((ms - double) / (triple - double)).clamp(0.0, 1.0)),
+            n => (n, 1.0),
+        }
+    }
+
     /// The whole hold, from press to the last step, which is what the fill
     /// measures itself against.
     pub fn span(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.triple_ms.max(self.double_ms))
     }
 
-    /// Where along that span the steps are, as fractions.
-    pub fn steps(&self) -> Vec<f32> {
-        let span = self.span().as_millis() as f32;
-        if span <= 0.0 {
-            return Vec::new();
-        }
-        [self.double_ms, self.triple_ms]
-            .into_iter()
-            .filter(|&ms| ms > 0)
-            .map(|ms| ms as f32 / span)
-            .collect()
+    /// How many clicks a hold can reach at all: one for the tap, and one for
+    /// each step that is switched on.
+    pub fn levels(&self) -> u32 {
+        self.clicks(std::time::Duration::from_secs(3600))
     }
 }
 
@@ -372,7 +379,9 @@ impl Default for Label {
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Colors {
-    /// Laid over the whole output so the labels have something to sit on.
+    /// Laid over the whole output. Transparent by default: the labels carry
+    /// themselves, and darkening the screen to read them is a tax on every
+    /// glance. Give it some alpha to have them stand out more.
     pub dim: Hex,
     /// Under every label and panel.
     pub shadow: Hex,
@@ -399,7 +408,7 @@ pub struct Colors {
 impl Default for Colors {
     fn default() -> Self {
         Colors {
-            dim: Hex(Color::new(0.0, 0.0, 0.0, 0.28)),
+            dim: Hex(Color::new(0.0, 0.0, 0.0, 0.0)),
             shadow: Hex(Color::new(0.0, 0.0, 0.0, 0.42)),
             hint: Hex(Color::new(0.98, 0.79, 0.29, 0.88)),
             hint_text: Hex(Color::new(0.14, 0.09, 0.0, 1.0)),
@@ -573,13 +582,19 @@ mod tests {
         let c = Click::default();
         let ms = std::time::Duration::from_millis;
         assert_eq!(c.clicks(ms(0)), 1);
-        assert_eq!(c.clicks(ms(249)), 1);
-        assert_eq!(c.clicks(ms(250)), 2);
-        assert_eq!(c.clicks(ms(549)), 2);
-        assert_eq!(c.clicks(ms(550)), 3);
+        assert_eq!(c.clicks(ms(349)), 1);
+        assert_eq!(c.clicks(ms(350)), 2);
+        assert_eq!(c.clicks(ms(799)), 2);
+        assert_eq!(c.clicks(ms(800)), 3);
         assert_eq!(c.clicks(ms(5000)), 3);
-        assert_eq!(c.span(), ms(550));
-        assert_eq!(c.steps(), vec![250.0 / 550.0, 1.0]);
+        assert_eq!(c.span(), ms(800));
+        // Each step fills on its own, and the last one sits full.
+        assert_eq!(c.stage(ms(0)), (1, 0.0));
+        assert_eq!(c.stage(ms(175)), (1, 0.5));
+        assert_eq!(c.stage(ms(350)), (2, 0.0));
+        assert_eq!(c.stage(ms(575)), (2, 0.5));
+        assert_eq!(c.stage(ms(800)), (3, 1.0));
+        assert_eq!(c.stage(ms(9000)), (3, 1.0));
 
         // Either step off means a hold never reaches it.
         let single = Click {
@@ -588,10 +603,12 @@ mod tests {
             charge: false,
         };
         assert_eq!(single.clicks(ms(9000)), 1);
-        assert!(single.steps().is_empty());
+        assert_eq!(single.levels(), 1);
+        assert_eq!(Click::default().levels(), 3);
         let no_triple: Click = serde_yaml::from_str("triple_ms: 0").unwrap();
         assert_eq!(no_triple.clicks(ms(9000)), 2);
-        assert_eq!(no_triple.span(), ms(250));
+        assert_eq!(no_triple.span(), ms(350));
+        assert_eq!(no_triple.stage(ms(9000)), (2, 1.0));
     }
 
     #[test]
