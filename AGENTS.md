@@ -44,6 +44,42 @@ Tone:
   turn every paragraph into bullet points.
 - Bold sparingly, only for genuinely load-bearing terms.
 
+## Documentation
+
+### README
+
+README.md is a front door, not a manual. Keep it short. It contains
+only:
+
+- What the project is, in a sentence or two
+- The minimum to get started: install and run
+- Links into `docs/` for everything else
+
+When a README section grows past a short paragraph, move the content
+to a file under `docs/` and leave a one-line link behind.
+
+### docs/
+
+Long-form documentation lives under `docs/`, one Markdown file per
+topic: architecture, configuration, development setup, deployment,
+troubleshooting, design notes. Name files in kebab-case, such as
+`docs/release-process.md`. Link between docs instead of duplicating
+content.
+
+### Keeping docs current
+
+Stale documentation is a bug. Updating docs is part of the change
+itself, never a follow-up task.
+
+- When a change alters behavior, commands, options, configuration,
+  project layout, or workflows, update the affected README section
+  and `docs/` pages in the same commit or PR.
+- Before calling any task done, check whether README.md or anything
+  under `docs/` mentions what you touched. If the docs still describe
+  the old state, the task is not done.
+- When you find a doc that is already wrong or obsolete, fix it or
+  delete it; do not leave it for the next person.
+
 ## Commits
 
 ### Header
