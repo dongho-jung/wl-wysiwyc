@@ -47,6 +47,10 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
     zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
 };
 
+/// How near the pointer has to get before what it is heading for counts as
+/// having caught it, in global logical pixels.
+const CAUGHT: f64 = 22.0;
+
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 
@@ -98,28 +102,52 @@ enum Stage {
     PickHint { win: usize },
 }
 
-/// The pointer on its way to a target. Snapping it there would be quicker,
-/// but a pointer that jumps leaves you hunting for it; one that travels tells
-/// you where it went and roughly how far.
-struct Glide {
-    from: (f64, f64),
+/// The pointer as something with weight, pulled at a target rather than put
+/// on one.
+///
+/// A pointer that is placed where it belongs tells you nothing on the way;
+/// one that has to be got moving and then stopped shows you where it went,
+/// how far, and which way. Pressing again while it is still moving does not
+/// start the journey over, it adds to what is already there, so a run of
+/// presses down a list builds speed the way pushing anything repeatedly
+/// does.
+struct Drift {
+    at: (f64, f64),
+    vel: (f64, f64),
+    /// What is pulling, which a further press moves rather than replaces.
     to: (f64, f64),
-    started: Instant,
+    stepped: Instant,
 }
 
-impl Glide {
-    /// Where the pointer should be now, and whether it has arrived.
-    fn at(&self) -> ((f64, f64), bool) {
-        let time = config::get().pointer.travel().as_secs_f64().max(0.001);
-        let t = (self.started.elapsed().as_secs_f64() / time).min(1.0);
-        // Quick off the mark, a little past the target, and back onto it: a
-        // pointer that arrives dead on reads as having been placed there,
-        // and one that settles reads as having been pulled.
-        let back = t - 1.0;
-        let e = 1.0 + 2.2 * back.powi(3) + 1.2 * back.powi(2);
-        let x = self.from.0 + (self.to.0 - self.from.0) * e;
-        let y = self.from.1 + (self.to.1 - self.from.1) * e;
-        ((x, y), t >= 1.0)
+impl Drift {
+    fn new(at: (f64, f64), to: (f64, f64)) -> Self {
+        Drift {
+            at,
+            vel: (0.0, 0.0),
+            to,
+            stepped: Instant::now(),
+        }
+    }
+
+    /// Carry the pointer forward by however long it has been since the last
+    /// time, and say whether it has come to rest.
+    fn step(&mut self) -> bool {
+        let now = Instant::now();
+        // A step longer than this is the loop having been held up elsewhere.
+        // Integrating it in one go would fling the pointer across the screen,
+        // so it is taken as a short step instead.
+        let dt = (now - self.stepped).as_secs_f64().min(0.03);
+        self.stepped = now;
+        // A spring, damped just under the point where it would stop dead:
+        // pulled harder the further it has to go, and left with enough in it
+        // to settle onto the target rather than halt on it.
+        let w = config::get().pointer.spring();
+        let (dx, dy) = (self.to.0 - self.at.0, self.to.1 - self.at.1);
+        self.vel.0 += (dx * w * w - self.vel.0 * 1.6 * w) * dt;
+        self.vel.1 += (dy * w * w - self.vel.1 * 1.6 * w) * dt;
+        self.at.0 += self.vel.0 * dt;
+        self.at.1 += self.vel.1 * dt;
+        dx.hypot(dy) < 0.7 && self.vel.0.hypot(self.vel.1) < 15.0
     }
 }
 
@@ -199,8 +227,12 @@ struct App {
     /// what it would select, and pressing it again takes it.
     armed: Option<char>,
     /// The target a complete hint or tile picked out, waiting for a click
-    /// key. The pointer is already sitting on it.
+    /// key. What a click key acts on, whether or not the pointer has caught
+    /// up with it yet.
     picked: Option<(Target, (f64, f64))>,
+    /// What the pointer is nearest at this moment, which is what is drawn
+    /// lit. The same thing as `picked` once the pointer has come to rest.
+    lit: Option<Target>,
     elements_cache: HashMap<usize, Vec<Element>>,
     pending_pick: Option<usize>,
     /// Whether nothing has happened since the overlay opened or was last
@@ -321,6 +353,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         watch: None,
         armed: None,
         picked: None,
+        lit: None,
         elements_cache: HashMap::new(),
         pending_pick,
         fresh: true,
@@ -382,7 +415,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
     // jumped to, and so a hand on the mouse can be told from the overlay's
     // own doing.
     let mut pointer_at = hypr::cursor_pos();
-    let mut glide: Option<Glide> = None;
+    let mut drift: Option<Drift> = None;
     // Where the pointer was last seen to be, once it had stopped being moved
     // from here. Compared against itself rather than against where it was
     // last sent, so that the compositor lagging a step behind cannot read as
@@ -413,7 +446,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             // whichever comes first.
             queue.flush()?;
             if let Some(guard) = queue.prepare_read() {
-                let wait = if glide.is_some() || app.settle.is_some() {
+                let wait = if drift.is_some() || app.settle.is_some() {
                     Duration::from_millis(8)
                 } else if app.watch.is_some() {
                     // Often enough to catch a scroll that went past the
@@ -465,37 +498,42 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             // than where it was picked keeps the requests and their roundtrip
             // out of the middle of an event callback.
             if let Some(to) = app.aim.take() {
-                glide = match pointer_at {
-                    Some(from) => Some(Glide {
-                        from,
-                        to,
-                        started: Instant::now(),
-                    }),
+                match (drift.as_mut(), pointer_at) {
+                    // Already moving: aim it somewhere else and let it keep
+                    // whatever speed it had, which is what makes a run of
+                    // presses gather pace instead of starting over.
+                    (Some(d), _) => d.to = to,
+                    (None, Some(from)) => drift = Some(Drift::new(from, to)),
                     // Nowhere to travel from, so just be there.
-                    None => {
+                    (None, None) => {
                         pointer_at = Some(to);
-                        None
-                    }
-                };
-                if glide.is_none() {
-                    if let Some(vp) = pointer.as_ref() {
-                        let extent = app.snap.layout_extent;
-                        move_and_click(vp, to, extent, None, &mut queue, &mut app)?;
+                        if let Some(vp) = pointer.as_ref() {
+                            let extent = app.snap.layout_extent;
+                            move_and_click(vp, to, extent, None, &mut queue, &mut app)?;
+                        }
+                        app.light_up(to);
                     }
                 }
                 resting = None;
             }
-            if let (Some(g), Some(vp)) = (glide.as_ref(), pointer.as_ref()) {
+            if let (Some(d), Some(vp)) = (drift.as_mut(), pointer.as_ref()) {
                 // The pointer is being moved from here, so where it is says
                 // nothing about hands.
                 looked = Instant::now();
                 resting = None;
-                let (at, done) = g.at();
+                let done = d.step();
                 let extent = app.snap.layout_extent;
-                move_and_click(vp, at, extent, None, &mut queue, &mut app)?;
-                pointer_at = Some(at);
+                let near = (d.to.0 - d.at.0).hypot(d.to.1 - d.at.1) < CAUGHT;
+                move_and_click(vp, d.at, extent, None, &mut queue, &mut app)?;
+                pointer_at = Some(d.at);
+                // Close enough to have been caught: whatever the pointer is
+                // on lights up. Not before, so that the trip itself is the
+                // pointer moving rather than a slideshow of repaints.
+                if near || done {
+                    app.light_up(d.at);
+                }
                 if done {
-                    glide = None;
+                    drift = None;
                 }
             }
             // A hand on the mouse says the keyboard was not what was wanted
@@ -504,7 +542,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             // itself, since asking where it is costs a round trip through
             // the compositor.
             let cancel = config::get().pointer.cancel_px;
-            if cancel > 0.0 && glide.is_none() && looked.elapsed() > Duration::from_millis(120) {
+            if cancel > 0.0 && drift.is_none() && looked.elapsed() > Duration::from_millis(120) {
                 looked = Instant::now();
                 if let Some(now) = hypr::cursor_pos() {
                     match resting {
@@ -896,8 +934,12 @@ impl App {
         // The overlay takes no pointer input, so sending the pointer here
         // lands it on the window underneath: whatever is under it lights up
         // the way it would if the pointer had been dragged there.
+        //
+        // Nothing is redrawn for this. The pointer setting off is the answer
+        // to the key, and what it is heading for lights up when it gets
+        // there: a whole output is dear enough to paint that doing it while
+        // the pointer is moving is what would make the move look stepped.
         self.aim = Some(at);
-        self.dirty = true;
     }
 
     /// Every target the current mode offers, with where clicking it would
@@ -955,6 +997,24 @@ impl App {
         if let Some(i) = pull(from, (dx, dy), &points) {
             let (what, at) = targets[i];
             self.focus(what, at);
+        }
+    }
+
+    /// Light up whatever the pointer is nearest now. Called as it travels,
+    /// so what it passes lights in turn and the trip reads as the pointer
+    /// being drawn to something rather than two states swapping.
+    fn light_up(&mut self, at: (f64, f64)) {
+        let near = self
+            .targets()
+            .into_iter()
+            .min_by(|a, b| {
+                let d = |p: (f64, f64)| (p.0 - at.0).powi(2) + (p.1 - at.1).powi(2);
+                d(a.1).total_cmp(&d(b.1))
+            })
+            .map(|(what, _)| what);
+        if near != self.lit {
+            self.lit = near;
+            self.dirty = true;
         }
     }
 
@@ -1028,6 +1088,9 @@ impl App {
         self.typed.clear();
         self.armed = None;
         self.picked = None;
+        // Hints are about to be rebuilt in some of the ways here, and what
+        // was lit was an index into the old ones.
+        self.lit = None;
         self.fresh = true;
         self.dirty = true;
     }
@@ -1163,8 +1226,8 @@ impl App {
         match self.stage {
             Stage::PickWindow => draw_pick_window(&self.snap, &self.font, &mut canvas, scale),
             Stage::PickTile { win } => {
-                let lit = match self.picked {
-                    Some((Target::Tile(ch), _)) => Some(ch),
+                let lit = match self.lit {
+                    Some(Target::Tile(ch)) => Some(ch),
                     _ => self.armed,
                 };
                 draw_pick_tile(&self.snap, win, lit, &self.font, &mut canvas, scale)
@@ -1174,8 +1237,8 @@ impl App {
                     hints: &self.hints,
                     typed: &self.typed,
                     armed: self.armed,
-                    picked: match self.picked {
-                        Some((Target::Hint(i), _)) => Some(i),
+                    picked: match self.lit {
+                        Some(Target::Hint(i)) => Some(i),
                         _ => None,
                     },
                     stale: self.settle.is_some(),
@@ -1703,7 +1766,7 @@ fn draw_pick_hint(
                 canvas.round_rect_shadow(
                     r.shift(0.0, 1.2 * s),
                     radius,
-                    3.5 * s,
+                    2.6 * s,
                     lit(*config::get().colors.shadow),
                 );
             }

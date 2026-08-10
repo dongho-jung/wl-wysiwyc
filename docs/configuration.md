@@ -52,9 +52,11 @@ pointer:
   # times a second while the overlay is open.
   cancel_px: 24
 
-  # How long the pointer takes to travel to a target. Long enough to
-  # follow, short enough not to wait for; 0 jumps.
-  travel_ms: 110
+  # About how long the pointer takes to reach a target. It is pulled
+  # there rather than put there, so this sets how hard the pull is
+  # rather than timing the trip: a press while it is still moving adds
+  # to the speed it already has, and a run of presses gathers pace.
+  travel_ms: 200
 
 scroll:
   # Wheel notches per press, and per press with shift. There is no

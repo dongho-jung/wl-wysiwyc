@@ -180,10 +180,24 @@ which is mostly whichever is nearest: being off the line counts against
 one, but not enough to reach past three targets for a fourth that
 happens to line up, which is what makes a step through a tangle of
 hints land on the next thing over rather than somewhere across the
-window. The pointer travels there over about a tenth of a second rather
-than jumping, and a little past the target before settling on it: a
-pointer that arrives dead on reads as having been placed there, one
-that settles reads as having been pulled.
+window.
+
+The pointer is then pulled at it rather than put on it. It is a mass on
+a spring, damped just under the point where it would stop dead, so it
+has to be got moving and then stopped, and pressing again before it
+arrives moves what is pulling without taking away the speed it already
+has: a run of presses down a list gathers pace the way pushing anything
+repeatedly does. `pointer.travel_ms` sets how hard the pull is, which
+is about how long a single trip takes.
+
+What it is heading for lights up when it gets there, not when the key
+was pressed. Nothing is redrawn while it travels, deliberately: a whole
+output costs tens of milliseconds to paint, and painting one mid-flight
+is what would make the flight look stepped. So the answer to an arrow
+key is the pointer setting off, and the answer to arriving is the
+target lighting up under it. What a click key acts on is settled from
+the moment the key was pressed either way, so a click during the trip
+still lands where the trip was going.
 
 Esc unwinds one step at a time: the armed key, then the target, then
 what was typed, then the overlay. Backspace undoes one key press.

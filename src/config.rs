@@ -327,8 +327,11 @@ pub struct Pointer {
     /// deliberate distance. Zero leaves the overlay up whatever the mouse
     /// does.
     pub cancel_px: f64,
-    /// How long the pointer takes to travel to a target. Long enough to
-    /// follow, short enough not to wait for.
+    /// About how long the pointer takes to reach a target. It is pulled
+    /// there rather than placed, so this is the settling time of the pull,
+    /// not a duration it is held to: a press while it is still moving adds
+    /// to the speed it already has. Long enough to follow, short enough not
+    /// to wait for.
     pub travel_ms: u64,
 }
 
@@ -336,14 +339,17 @@ impl Default for Pointer {
     fn default() -> Self {
         Pointer {
             cancel_px: 24.0,
-            travel_ms: 110,
+            travel_ms: 200,
         }
     }
 }
 
 impl Pointer {
-    pub fn travel(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.travel_ms)
+    /// The pull on the pointer, as the rate of the spring that moves it.
+    /// Set from how long a trip should take: a damped spring is settled
+    /// after about four and a half of these.
+    pub fn spring(&self) -> f64 {
+        4.6 / (self.travel_ms.max(20) as f64 / 1000.0)
     }
 }
 
