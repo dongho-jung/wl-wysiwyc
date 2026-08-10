@@ -327,6 +327,17 @@ pub struct Pointer {
     /// deliberate distance. Zero leaves the overlay up whatever the mouse
     /// does.
     pub cancel_px: f64,
+    /// How hard an arrow key pushes the pointer, in pixels per second per
+    /// second. It is flown rather than sent: a tap nudges it to the next
+    /// thing along, holding builds speed across the window.
+    pub accel_px: f64,
+    /// What slows it down again, as a fraction of its speed per second.
+    /// Together with the push this decides how fast it can go: about
+    /// accel_px over drag.
+    pub drag: f64,
+    /// How near a target has to be to catch the pointer as it slows, and so
+    /// how precisely it can be flown between two of them.
+    pub snap_px: f64,
     /// About how long the pointer takes to reach a target. It is pulled
     /// there rather than placed, so this is the settling time of the pull,
     /// not a duration it is held to: a press while it is still moving adds
@@ -339,6 +350,9 @@ impl Default for Pointer {
     fn default() -> Self {
         Pointer {
             cancel_px: 24.0,
+            accel_px: 5200.0,
+            drag: 8.5,
+            snap_px: 70.0,
             travel_ms: 200,
         }
     }

@@ -141,7 +141,9 @@ impl Canvas<'_> {
         for (off, s) in src.iter().enumerate() {
             let s = (s.clamp(0.0, 1.0) * 255.0 + 0.5) as u32 * a;
             let d = self.buf[i + off] as u32 * inv;
-            self.buf[i + off] = ((s + d + 127) / 255).min(255) as u8;
+            // Dividing by 255 without dividing.
+            let v = s + d;
+            self.buf[i + off] = ((v + 128 + (v >> 8)) >> 8).min(255) as u8;
         }
     }
 
@@ -252,9 +254,133 @@ impl Canvas<'_> {
         pen
     }
 
+    /// A rounded chip with its shadow and outline, drawn once and kept.
+    ///
+    /// This is the same picture `round_rect` and friends would make, and it
+    /// is here because a window's worth of labels is a million pixels of
+    /// measuring the same few shapes over and over. `fade` thins the whole
+    /// thing, for labels that are not to be typed yet.
+    pub fn chip(&mut self, r: Rect, style: Style, fade: f32) {
+        let pad = (style.blur + style.drop + style.edge_w + 2.0).ceil();
+        let (w, h) = (r.w.round() as i32, r.h.round() as i32);
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let (cw, ch) = (w + 2 * pad as i32, h + 2 * pad as i32);
+        let key = style.key(w, h);
+        CHIPS.with(|chips| {
+            let mut chips = chips.borrow_mut();
+            let chip = chips.entry(key).or_insert_with(|| {
+                let mut px = vec![0u8; (cw * ch * 4) as usize];
+                let mut into = Canvas {
+                    buf: &mut px,
+                    w: cw,
+                    h: ch,
+                };
+                let at = Rect::new(pad, pad, w as f32, h as f32);
+                into.round_rect_shadow(
+                    at.shift(0.0, style.drop),
+                    style.radius,
+                    style.blur.max(0.01),
+                    style.shadow,
+                );
+                into.round_rect(at, style.radius, style.bg);
+                into.round_rect_outline(at, style.radius, style.edge_w, style.edge);
+                Chip { w: cw, h: ch, px }
+            });
+            self.put(r.x - pad, r.y - pad, chip, fade);
+        });
+    }
+
+    /// Blend a chip onto the canvas. Both sides are premultiplied, so this is
+    /// source-over and a multiply for the fade, with no shape to work out.
+    ///
+    /// A row at a time over slices rather than a pixel at a time by index:
+    /// this is the inner loop of a frame, and bounds checking every channel
+    /// of every pixel of a hundred labels is most of what it would cost.
+    fn put(&mut self, x: f32, y: f32, chip: &Chip, fade: f32) {
+        let (ox, oy) = (x.round() as i32, y.round() as i32);
+        let fade = (fade.clamp(0.0, 1.0) * 256.0) as u32;
+        let x0 = ox.max(0);
+        let x1 = (ox + chip.w).min(self.w);
+        if x1 <= x0 {
+            return;
+        }
+        let run = (x1 - x0) as usize;
+        for row in 0..chip.h {
+            let dy = oy + row;
+            if dy < 0 || dy >= self.h {
+                continue;
+            }
+            let s = ((row * chip.w + (x0 - ox)) * 4) as usize;
+            let d = ((dy * self.w + x0) * 4) as usize;
+            let src = &chip.px[s..s + run * 4];
+            let dst = &mut self.buf[d..d + run * 4];
+            for (s, d) in src.chunks_exact(4).zip(dst.chunks_exact_mut(4)) {
+                let a = (s[3] as u32 * fade) >> 8;
+                if a == 0 {
+                    continue;
+                }
+                let inv = 255 - a;
+                for k in 0..4 {
+                    let over = (s[k] as u32 * fade) >> 8;
+                    let under = d[k] as u32 * inv;
+                    // Dividing by 255 without dividing.
+                    let under = (under + 128 + (under >> 8)) >> 8;
+                    d[k] = (over + under).min(255) as u8;
+                }
+            }
+        }
+    }
+
     pub fn text_centered(&mut self, font: &Font, text: &str, cx: f32, cy: f32, px: f32, c: Color) {
         let pen = cx - text_width(font, text, px) / 2.0;
         self.text_run(font, text, pen, baseline(font, cy, px), px, c);
+    }
+}
+
+/// A drawn chip, kept so that a hundred identical labels cost one rendering.
+/// Premultiplied Bgra, the same as the canvas, so putting one down is a
+/// blend and nothing else.
+struct Chip {
+    w: i32,
+    h: i32,
+    px: Vec<u8>,
+}
+
+thread_local! {
+    /// Chips by shape and colour. A window's labels come in two or three
+    /// widths and one height, so this holds a handful of entries and saves
+    /// measuring a rounded rectangle a million times a frame.
+    static CHIPS: RefCell<HashMap<u64, Chip>> = RefCell::new(HashMap::new());
+}
+
+/// Everything that decides what a chip looks like.
+#[derive(Clone, Copy)]
+pub struct Style {
+    pub radius: f32,
+    pub blur: f32,
+    /// How far the shadow sits below the chip.
+    pub drop: f32,
+    pub bg: Color,
+    pub edge: Color,
+    pub edge_w: f32,
+    pub shadow: Color,
+}
+
+impl Style {
+    fn key(&self, w: i32, h: i32) -> u64 {
+        let c = |c: Color| {
+            let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u64;
+            (b(c.r) << 24) | (b(c.g) << 16) | (b(c.b) << 8) | b(c.a)
+        };
+        let f = |v: f32| (v * 4.0) as u64;
+        let mut k = (w as u64) << 48 | (h as u64) << 32;
+        k ^= c(self.bg).wrapping_mul(0x9E3779B97F4A7C15);
+        k ^= c(self.edge).wrapping_mul(0xC2B2AE3D27D4EB4F);
+        k ^= c(self.shadow).wrapping_mul(0x165667B19E3779F9);
+        k ^= (f(self.radius) << 20) | (f(self.blur) << 12) | (f(self.drop) << 6) | f(self.edge_w);
+        k
     }
 }
 

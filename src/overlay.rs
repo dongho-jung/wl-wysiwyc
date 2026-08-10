@@ -51,6 +51,10 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
 /// having caught it, in global logical pixels.
 const CAUGHT: f64 = 22.0;
 
+/// How slowly the pointer has to be going before a target near it can take
+/// hold, in pixels a second. Faster than this and it flies on by.
+const CATCH: f64 = 300.0;
+
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 
@@ -114,13 +118,14 @@ enum Stage {
 struct Drift {
     at: (f64, f64),
     vel: (f64, f64),
-    /// What is pulling, which a further press moves rather than replaces.
-    to: (f64, f64),
+    /// Where it is being pulled, when something has hold of it. Nothing has
+    /// while it is being flown, which is what lets it be flown past things.
+    to: Option<(f64, f64)>,
     stepped: Instant,
 }
 
 impl Drift {
-    fn new(at: (f64, f64), to: (f64, f64)) -> Self {
+    fn new(at: (f64, f64), to: Option<(f64, f64)>) -> Self {
         Drift {
             at,
             vel: (0.0, 0.0),
@@ -129,25 +134,48 @@ impl Drift {
         }
     }
 
+    fn speed(&self) -> f64 {
+        self.vel.0.hypot(self.vel.1)
+    }
+
     /// Carry the pointer forward by however long it has been since the last
     /// time, and say whether it has come to rest.
-    fn step(&mut self) -> bool {
+    fn step(&mut self, thrust: (f64, f64)) -> bool {
         let now = Instant::now();
         // A step longer than this is the loop having been held up elsewhere.
         // Integrating it in one go would fling the pointer across the screen,
         // so it is taken as a short step instead.
         let dt = (now - self.stepped).as_secs_f64().min(0.03);
         self.stepped = now;
-        // A spring, damped just under the point where it would stop dead:
-        // pulled harder the further it has to go, and left with enough in it
-        // to settle onto the target rather than halt on it.
-        let w = config::get().pointer.spring();
-        let (dx, dy) = (self.to.0 - self.at.0, self.to.1 - self.at.1);
-        self.vel.0 += (dx * w * w - self.vel.0 * 1.6 * w) * dt;
-        self.vel.1 += (dy * w * w - self.vel.1 * 1.6 * w) * dt;
+        self.advance(dt, thrust)
+    }
+
+    /// The step itself, given how long it is. Apart from the clock this is
+    /// all there is to the motion, so it is where the numbers can be checked.
+    fn advance(&mut self, dt: f64, thrust: (f64, f64)) -> bool {
+        let cfg = &config::get().pointer;
+        let done = match self.to {
+            // Something has hold of it: a spring, damped just under the point
+            // where it would stop dead, so that it settles onto the target
+            // rather than halting on it.
+            Some((tx, ty)) => {
+                let w = cfg.spring();
+                let (dx, dy) = (tx - self.at.0, ty - self.at.1);
+                self.vel.0 += (dx * w * w - self.vel.0 * 1.6 * w) * dt;
+                self.vel.1 += (dy * w * w - self.vel.1 * 1.6 * w) * dt;
+                dx.hypot(dy) < 0.7 && self.speed() < 15.0
+            }
+            // Being flown: pushed while a key is held, slowed by drag the
+            // rest of the time, and carrying whatever speed it already has.
+            None => {
+                self.vel.0 += (thrust.0 * cfg.accel_px - self.vel.0 * cfg.drag) * dt;
+                self.vel.1 += (thrust.1 * cfg.accel_px - self.vel.1 * cfg.drag) * dt;
+                thrust == (0.0, 0.0) && self.speed() < 8.0
+            }
+        };
         self.at.0 += self.vel.0 * dt;
         self.at.1 += self.vel.1 * dt;
-        dx.hypot(dy) < 0.7 && self.vel.0.hypot(self.vel.1) < 15.0
+        done
     }
 }
 
@@ -233,6 +261,12 @@ struct App {
     /// What the pointer is nearest at this moment, which is what is drawn
     /// lit. The same thing as `picked` once the pointer has come to rest.
     lit: Option<Target>,
+    /// Which arrow keys are down and since when: left, right, up, down. They
+    /// push the pointer while they are held rather than sending it anywhere.
+    held: [Option<Instant>; 4],
+    /// Whether the pointer is being flown rather than sent, in which case
+    /// what it is nearest is what is picked, moment to moment.
+    flying: bool,
     elements_cache: HashMap<usize, Vec<Element>>,
     pending_pick: Option<usize>,
     /// Whether nothing has happened since the overlay opened or was last
@@ -354,6 +388,8 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         armed: None,
         picked: None,
         lit: None,
+        held: [None; 4],
+        flying: false,
         elements_cache: HashMap::new(),
         pending_pick,
         fresh: true,
@@ -502,8 +538,8 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
                     // Already moving: aim it somewhere else and let it keep
                     // whatever speed it had, which is what makes a run of
                     // presses gather pace instead of starting over.
-                    (Some(d), _) => d.to = to,
-                    (None, Some(from)) => drift = Some(Drift::new(from, to)),
+                    (Some(d), _) => d.to = Some(to),
+                    (None, Some(from)) => drift = Some(Drift::new(from, Some(to))),
                     // Nowhere to travel from, so just be there.
                     (None, None) => {
                         pointer_at = Some(to);
@@ -516,20 +552,44 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
                 }
                 resting = None;
             }
+            // An arrow key held down takes the pointer off whatever had hold
+            // of it: it is being flown now, and flying past things is the
+            // point.
+            let thrust = app.thrust();
+            if thrust != (0.0, 0.0) {
+                match drift.as_mut() {
+                    Some(d) => d.to = None,
+                    None => {
+                        drift = Some(Drift::new(pointer_at.unwrap_or_default(), None));
+                    }
+                }
+            }
             if let (Some(d), Some(vp)) = (drift.as_mut(), pointer.as_ref()) {
                 // The pointer is being moved from here, so where it is says
                 // nothing about hands.
                 looked = Instant::now();
                 resting = None;
-                let done = d.step();
+                let done = d.step(thrust);
+                // Slowing down with nothing holding it: whatever it is over
+                // catches it, and the spring reels it the rest of the way in.
+                if d.to.is_none() && thrust == (0.0, 0.0) && d.speed() < CATCH {
+                    let snap = config::get().pointer.snap_px;
+                    if let Some((_, at, away)) = app.nearest(d.at) {
+                        if away < snap {
+                            d.to = Some(at);
+                        }
+                    }
+                }
                 let extent = app.snap.layout_extent;
-                let near = (d.to.0 - d.at.0).hypot(d.to.1 - d.at.1) < CAUGHT;
+                let caught =
+                    d.to.is_some_and(|to| (to.0 - d.at.0).hypot(to.1 - d.at.1) < CAUGHT);
                 move_and_click(vp, d.at, extent, None, &mut queue, &mut app)?;
                 pointer_at = Some(d.at);
-                // Close enough to have been caught: whatever the pointer is
-                // on lights up. Not before, so that the trip itself is the
-                // pointer moving rather than a slideshow of repaints.
-                if near || done {
+                // While it is being flown, what it is over is what is picked,
+                // so the lighting keeps up with it. On a trip to somewhere
+                // chosen, only the arrival is drawn: painting a whole output
+                // mid-flight is what would make the flight look stepped.
+                if app.flying || caught || done {
                     app.light_up(d.at);
                 }
                 if done {
@@ -799,6 +859,13 @@ impl App {
 
     /// A click key coming up spends the hold.
     fn release(&mut self, key: Key) {
+        match key {
+            Key::Left => return self.hold_arrow(0, false),
+            Key::Right => return self.hold_arrow(1, false),
+            Key::Up => return self.hold_arrow(2, false),
+            Key::Down => return self.hold_arrow(3, false),
+            _ => {}
+        }
         let (Some(button), Some(charge)) = (Self::click_button(key), self.charge.take()) else {
             return;
         };
@@ -837,10 +904,10 @@ impl App {
             Key::Tab => return self.pick_window(),
             Key::Reset => return self.reset_or_quit(),
             Key::Switch => return self.switch_mode(),
-            Key::Left => return self.step(-1.0, 0.0),
-            Key::Right => return self.step(1.0, 0.0),
-            Key::Up => return self.step(0.0, -1.0),
-            Key::Down => return self.step(0.0, 1.0),
+            Key::Left => return self.hold_arrow(0, true),
+            Key::Right => return self.hold_arrow(1, true),
+            Key::Up => return self.hold_arrow(2, true),
+            Key::Down => return self.hold_arrow(3, true),
             Key::Scroll(w) => return self.roll(w),
             Key::Char(ch) => ch.to_ascii_lowercase(),
             // Taken above, before anything could cancel a hold.
@@ -931,6 +998,7 @@ impl App {
         self.typed.clear();
         self.armed = None;
         self.picked = Some((what, at));
+        self.flying = false;
         // The overlay takes no pointer input, so sending the pointer here
         // lands it on the window underneath: whatever is under it lights up
         // the way it would if the pointer had been dragged there.
@@ -975,45 +1043,62 @@ impl App {
     /// items the way you would expect. Only when there is nothing in line does
     /// the search widen to a cone, so leaving the end of a row still goes
     /// somewhere sensible rather than nowhere.
-    fn step(&mut self, dx: f64, dy: f64) {
-        if self.settle.is_some() {
+    /// An arrow key going down or coming up. Holding one pushes the pointer
+    /// that way for as long as it is held, so a tap nudges it to the next
+    /// thing along and a hold carries it across the window.
+    fn hold_arrow(&mut self, which: usize, down: bool) {
+        if self.held[which].is_some() == down {
             return;
         }
-        self.fresh = false;
-        let from = match self.picked {
-            Some((_, at)) => at,
-            None => match hypr::cursor_pos() {
-                Some(at) => at,
-                None => return,
-            },
-        };
-        let here = self.picked.map(|(p, _)| p);
-        let targets: Vec<(Target, (f64, f64))> = self
-            .targets()
-            .into_iter()
-            .filter(|&(what, _)| here != Some(what))
-            .collect();
-        let points: Vec<(f64, f64)> = targets.iter().map(|&(_, at)| at).collect();
-        if let Some(i) = pull(from, (dx, dy), &points) {
-            let (what, at) = targets[i];
-            self.focus(what, at);
+        self.held[which] = down.then(Instant::now);
+        if down {
+            self.fresh = false;
+            self.flying = true;
+            self.typed.clear();
+            self.armed = None;
+            self.charge = None;
+            self.dirty = true;
         }
     }
 
-    /// Light up whatever the pointer is nearest now. Called as it travels,
-    /// so what it passes lights in turn and the trip reads as the pointer
-    /// being drawn to something rather than two states swapping.
-    fn light_up(&mut self, at: (f64, f64)) {
-        let near = self
-            .targets()
+    /// Which way the keys being held are pushing, as a unit vector.
+    ///
+    /// A key held for longer than any window is wide has not been let go of:
+    /// the release was lost somewhere, and the pointer should stop rather
+    /// than fly on into a corner.
+    fn thrust(&self) -> (f64, f64) {
+        let down = |i: usize| {
+            self.held[i].is_some_and(|since| since.elapsed() < Duration::from_millis(2500))
+        };
+        let axis = |less: usize, more: usize| f64::from(down(more)) - f64::from(down(less));
+        let (x, y) = (axis(0, 1), axis(2, 3));
+        let len = x.hypot(y);
+        match len > 0.0 {
+            true => (x / len, y / len),
+            false => (0.0, 0.0),
+        }
+    }
+
+    /// Whatever the pointer is nearest, and how far off it is.
+    fn nearest(&self, at: (f64, f64)) -> Option<(Target, (f64, f64), f64)> {
+        self.targets()
             .into_iter()
-            .min_by(|a, b| {
-                let d = |p: (f64, f64)| (p.0 - at.0).powi(2) + (p.1 - at.1).powi(2);
-                d(a.1).total_cmp(&d(b.1))
-            })
-            .map(|(what, _)| what);
-        if near != self.lit {
-            self.lit = near;
+            .map(|(what, p)| (what, p, (p.0 - at.0).hypot(p.1 - at.1)))
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+    }
+
+    /// Light up whatever the pointer is nearest now, and while it is being
+    /// flown, pick it too: there is no target waiting at the end of the trip,
+    /// so what it is over is what a click would take.
+    fn light_up(&mut self, at: (f64, f64)) {
+        let Some((what, where_, _)) = self.nearest(at) else {
+            return;
+        };
+        if self.flying {
+            self.picked = Some((what, where_));
+        }
+        if Some(what) != self.lit {
+            self.lit = Some(what);
             self.dirty = true;
         }
     }
@@ -1061,13 +1146,15 @@ impl App {
     }
 
     /// Esc unwinds one step at a time: the armed key, then what was picked,
-    /// then everything typed, then quit.
+    /// then everything typed, then quit. Nothing having happened yet counts
+    /// as unwound already, so opening the overlay and changing your mind is
+    /// one press rather than two.
     fn cancel(&mut self) {
-        if self.armed.take().is_some() || self.picked.take().is_some() {
-            self.dirty = true;
-            return;
-        }
-        if !self.typed.is_empty() {
+        // What the pointer is over is not a state to back out of: it is
+        // wherever the pointer is, and it will be over something else the
+        // moment the pointer moves. So Esc unwinds what was typed, and
+        // leaves.
+        if !self.fresh && (self.armed.take().is_some() || !self.typed.is_empty()) {
             self.typed.clear();
             self.dirty = true;
             return;
@@ -1258,32 +1345,6 @@ impl App {
         surface.damage_buffer(0, 0, bw, bh);
         surface.commit();
     }
-}
-
-/// Which of these points a step in a direction should land on.
-///
-/// Whichever pulls hardest, which is mostly whichever is nearest: a step is
-/// meant to land on the next thing over, and ranking by how well something
-/// lines up is what reaches past three of them for a fourth. Being off the
-/// line still counts against a target, enough to keep a row or a column
-/// reading straight when the choice is otherwise close.
-fn pull(from: (f64, f64), (dx, dy): (f64, f64), at: &[(f64, f64)]) -> Option<usize> {
-    /// What a pixel off the line costs, against a pixel of plain distance.
-    const ACROSS: f64 = 1.8;
-    /// How far off the line is still that way at all: about sixty degrees
-    /// either side.
-    const CONE: f64 = 1.7;
-    at.iter()
-        .enumerate()
-        .filter_map(|(i, &(x, y))| {
-            let (ox, oy) = (x - from.0, y - from.1);
-            let along = ox * dx + oy * dy;
-            let across = (ox * dy - oy * dx).abs();
-            (along > 2.0 && across <= CONE * along)
-                .then_some((along.hypot(across) + ACROSS * across, i))
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, i)| i)
 }
 
 /// Label a window's elements and place them in global coordinates.
@@ -1730,19 +1791,21 @@ fn draw_pick_hint(
             // An armed key lifts the hints it would keep. It does not push
             // the others down: nothing has been confirmed yet, and dimming
             // them would answer a question the press has only asked.
+            // The colours a chip is kept under, before the fade that a stale
+            // label wears: fading here as well would fade it twice.
             let (ring, bg, edge, text) = if hot {
                 (
-                    lit(*config::get().colors.ring),
-                    lit(*config::get().colors.armed),
-                    lit(armed_edge()),
-                    lit(*config::get().colors.armed_text),
+                    *config::get().colors.ring,
+                    *config::get().colors.armed,
+                    armed_edge(),
+                    *config::get().colors.armed_text,
                 )
             } else {
                 (
-                    lit(shade(*config::get().colors.hint, 0.5)),
-                    lit(*config::get().colors.hint),
-                    lit(hint_edge()),
-                    lit(*config::get().colors.hint_text),
+                    shade(*config::get().colors.hint, 0.5),
+                    *config::get().colors.hint,
+                    hint_edge(),
+                    *config::get().colors.hint_text,
                 )
             };
             // Only the element about to be clicked is outlined. Ringing
@@ -1756,24 +1819,44 @@ fn draw_pick_hint(
                     (h.rh * scale as f64) as f32,
                 );
                 canvas.round_rect_shadow(el, 4.0 * s, 6.0 * s, lit(armed_glow().fade(0.45)));
-                canvas.round_rect_outline(el, 4.0 * s, 2.0 * s, ring);
+                canvas.round_rect_outline(el, 4.0 * s, 2.0 * s, lit(ring));
             }
             let r = b.rect();
             let radius = r.h * 0.3;
             if hot && clinches {
+                // One label at a time wears the glow, so it is drawn the long
+                // way round rather than kept.
                 canvas.round_rect_shadow(r, radius, 7.0 * s, lit(armed_glow()));
+                canvas.round_rect(r, radius, lit(bg));
+                canvas.round_rect_outline(r, radius, s, lit(edge));
             } else {
-                canvas.round_rect_shadow(
-                    r.shift(0.0, 1.2 * s),
-                    radius,
-                    2.6 * s,
-                    lit(*config::get().colors.shadow),
+                // Every other label is the same picture in a different place.
+                canvas.chip(
+                    r,
+                    draw::Style {
+                        radius,
+                        blur: 2.6 * s,
+                        drop: 1.2 * s,
+                        bg,
+                        edge,
+                        edge_w: s,
+                        shadow: *config::get().colors.shadow,
+                    },
+                    if stale { 0.55 } else { 1.0 },
                 );
             }
-            canvas.round_rect(r, radius, bg);
-            canvas.round_rect_outline(r, radius, s, edge);
             let cap = hot && armed.is_some();
-            draw_label_text(canvas, font, r, &h.label, typed.len(), cap, px, text, s);
+            draw_label_text(
+                canvas,
+                font,
+                r,
+                &h.label,
+                typed.len(),
+                cap,
+                px,
+                lit(text),
+                s,
+            );
         }
     }
 }
@@ -2171,50 +2254,50 @@ wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerV1);
 
 #[cfg(test)]
 mod tests {
-    use super::pull;
+    use super::Drift;
 
     const RIGHT: (f64, f64) = (1.0, 0.0);
-    const DOWN: (f64, f64) = (0.0, 1.0);
-    const LEFT: (f64, f64) = (-1.0, 0.0);
+    const NONE: (f64, f64) = (0.0, 0.0);
 
-    #[test]
-    fn a_column_is_walked_one_row_at_a_time() {
-        let rows = [(0.0, 30.0), (0.0, 60.0), (0.0, 90.0)];
-        assert_eq!(pull((0.0, 0.0), DOWN, &rows), Some(0));
-        assert_eq!(pull((0.0, 30.0), DOWN, &rows), Some(1));
-        assert_eq!(pull((0.0, 90.0), DOWN, &rows), None);
+    /// Fly for a while and then let go, at a frame rate the loop can hold.
+    fn fly(push_ms: u32, coast_ms: u32) -> (f64, f64) {
+        let mut d = Drift::new((0.0, 0.0), None);
+        let step = 0.008;
+        for _ in 0..(push_ms as f64 / 1000.0 / step) as u32 {
+            d.advance(step, RIGHT);
+        }
+        let pushed = d.at.0;
+        for _ in 0..(coast_ms as f64 / 1000.0 / step) as u32 {
+            d.advance(step, NONE);
+        }
+        (pushed, d.at.0)
     }
 
     #[test]
-    fn the_near_one_off_the_line_beats_the_far_one_on_it() {
-        // What a tangle of hints looks like: something right there but a row
-        // down, and something lined up but across the window. Ranking by how
-        // well things line up takes the far one and skips what is under your
-        // nose; nearness has to win by then.
-        let at = [(20.0, 25.0), (600.0, 0.0)];
-        assert_eq!(pull((0.0, 0.0), RIGHT, &at), Some(0));
-        // Still true a whole row of them along.
-        let row = [(40.0, 30.0), (80.0, 30.0), (300.0, 0.0)];
-        assert_eq!(pull((0.0, 0.0), RIGHT, &row), Some(0));
+    fn a_tap_nudges_and_a_hold_carries() {
+        // A tap is worth the next thing along, not the far side of a window.
+        let (pushed, stopped) = fly(60, 600);
+        assert!(pushed > 5.0 && pushed < 25.0, "a tap pushed {pushed}px");
+        assert!(stopped > 30.0 && stopped < 90.0, "a tap ran {stopped}px");
+        // Holding it builds speed: a second of it crosses a screen.
+        let (_, far) = fly(1000, 600);
+        assert!(far > 500.0, "a second of holding went only {far}px");
     }
 
     #[test]
-    fn lining_up_still_decides_a_close_call() {
-        let at = [(100.0, 0.0), (90.0, 60.0)];
-        assert_eq!(pull((0.0, 0.0), RIGHT, &at), Some(0));
-    }
-
-    #[test]
-    fn nothing_behind_and_nothing_sideways() {
-        let behind = [(-50.0, 0.0), (-10.0, -10.0)];
-        assert_eq!(pull((0.0, 0.0), RIGHT, &behind), None);
-        assert_eq!(pull((0.0, 0.0), LEFT, &behind), Some(1));
-        // Straight down from here is not to the right of here.
-        assert_eq!(pull((0.0, 0.0), RIGHT, &[(0.0, 40.0)]), None);
-    }
-
-    #[test]
-    fn an_empty_window_has_nowhere_to_step() {
-        assert_eq!(pull((0.0, 0.0), DOWN, &[]), None);
+    fn letting_go_comes_to_a_stop() {
+        let mut d = Drift::new((0.0, 0.0), None);
+        for _ in 0..40 {
+            d.advance(0.008, RIGHT);
+        }
+        let mut rest = None;
+        for tick in 0..250 {
+            if d.advance(0.008, NONE) {
+                rest = Some(tick);
+                break;
+            }
+        }
+        let tick = rest.expect("still moving two seconds after letting go");
+        assert!(tick < 150, "took {tick} frames to stop");
     }
 }

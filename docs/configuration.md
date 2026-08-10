@@ -52,10 +52,21 @@ pointer:
   # times a second while the overlay is open.
   cancel_px: 24
 
-  # About how long the pointer takes to reach a target. It is pulled
-  # there rather than put there, so this sets how hard the pull is
-  # rather than timing the trip: a press while it is still moving adds
-  # to the speed it already has, and a run of presses gathers pace.
+  # The arrow keys fly the pointer rather than move it from one target
+  # to the next: accel_px is how hard a held key pushes, drag is what
+  # slows it down again, and between them they set how fast it can go
+  # (about accel_px over drag). A tap coasts a target or two along; a
+  # hold crosses the window.
+  accel_px: 5200
+  drag: 8.5
+
+  # How near a target has to be to catch the pointer as it slows, which
+  # is also how precisely it can be flown between two of them.
+  snap_px: 70
+
+  # About how long the pointer takes to reach a target it was sent to
+  # by name, by typing a hint. It is pulled there rather than put there,
+  # so this sets how hard the pull is rather than timing the trip.
   travel_ms: 200
 
 scroll:

@@ -175,42 +175,45 @@ that lag as a hand.
 
 The overlay opens with the target already on whatever the pointer is
 nearest, so a click can need no typing at all, and the arrow keys move
-it from there. A step goes to whichever target that way pulls hardest,
-which is mostly whichever is nearest: being off the line counts against
-one, but not enough to reach past three targets for a fourth that
-happens to line up, which is what makes a step through a tangle of
-hints land on the next thing over rather than somewhere across the
-window.
+it from there.
 
-The pointer is then pulled at it rather than put on it. It is a mass on
-a spring, damped just under the point where it would stop dead, so it
-has to be got moving and then stopped, and pressing again before it
-arrives moves what is pulling without taking away the speed it already
-has: a run of presses down a list gathers pace the way pushing anything
-repeatedly does. `pointer.travel_ms` sets how hard the pull is, which
-is about how long a single trip takes.
+The arrow keys do not move it from one target to the next. They push
+the pointer, for as long as they are held, and it has weight: a tap
+gets it going and it coasts to a stop a target or two along, a hold
+builds speed until drag balances the push and carries it across the
+window, and two keys at once push diagonally. `pointer.accel_px` is the
+push and `pointer.drag` is what slows it, which between them set how
+fast it can go.
 
-What it is heading for lights up when it gets there, not when the key
-was pressed. Nothing is redrawn while it travels, deliberately: a whole
-output costs tens of milliseconds to paint, and painting one mid-flight
-is what would make the flight look stepped. So the answer to an arrow
-key is the pointer setting off, and the answer to arriving is the
-target lighting up under it. What a click key acts on is settled from
-the moment the key was pressed either way, so a click during the trip
-still lands where the trip was going.
+Whatever it is over is what is picked, moment to moment, so the choice
+follows the pointer rather than being decided when the key went down.
+As it slows, anything within `pointer.snap_px` catches it and reels it
+the rest of the way in, on a spring damped just under the point where
+it would stop dead. That is what makes it land on a target rather than
+between two, and what makes a light tap worth exactly one target rather
+than none or three.
 
-Esc unwinds one step at a time: the armed key, then the target, then
-what was typed, then the overlay. Backspace undoes one key press.
-`keys.switch` (space) swaps element hints for the letter grid. Tab opens
-the window picker.
+Typing a hint is the other way in: that names a target outright, and
+the pointer is pulled straight there at `pointer.travel_ms` without
+being flown. Nothing is redrawn during that trip, deliberately, since a
+whole output costs tens of milliseconds to paint and painting one
+mid-flight is what would make the flight look stepped; what the pointer
+is heading for lights up when it arrives. A click key acts on what the
+trip was going to, so pressing one mid-flight still lands there.
 
-A key does one job. Each of them registers one shortcut with the
-compositor, and the submap binds the keys that press it: several keys on
-one click is several binds on one shortcut, not several shortcuts. When
-the config gives a key away, whatever else wanted it steps aside rather
-than both firing, so putting space on `left_click` leaves the grid with
-no switch key until another is named. `wl-wysiwyc --keys` prints what
-the submap would bind, which is the quick way to see what a config did.
+Esc unwinds what was typed and then leaves, and leaves on the first
+press when nothing has been typed yet. What the pointer is over is not a
+state to back out of: it is wherever the pointer is, and it will be over
+something else the moment the pointer moves. Backspace undoes one key
+press. `keys.switch` (space) swaps element hints for the letter grid.
+Tab opens the window picker. A key does one job. Each of them registers
+one shortcut with the compositor, and the submap binds the keys that
+press it: several keys on one click is several binds on one shortcut,
+not several shortcuts. When the config gives a key away, whatever else
+wanted it steps aside rather than both firing, so putting space on
+`left_click` leaves the grid with no switch key until another is named.
+`wl-wysiwyc --keys` prints what the submap would bind, which is the
+quick way to see what a config did.
 
 `keys.reset` is worth setting to whatever key opens the overlay. While
 the overlay is up its keys live in a compositor submap, and a submap
