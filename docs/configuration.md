@@ -37,6 +37,18 @@ keys:
   # here to keep the grid within reach. Empty means none.
   switch: space
 
+click:
+  # A click key clicks when it is let go, and how long it was held says
+  # how many times: a tap clicks once, holding past double_ms clicks
+  # twice, past triple_ms three times. Zero on either turns that step
+  # off, so double_ms: 0 leaves every click single.
+  double_ms: 250
+  triple_ms: 550
+
+  # Fill the target while the key is down, with a notch at each step, so
+  # the count is something to watch rather than to time in your head.
+  charge: true
+
   # The keyboard the labels are laid out on, so that where something is
   # on screen decides which key names it: qwerty, dvorak, or none. With
   # none there is no arrangement to follow and labels are handed out a
@@ -73,6 +85,7 @@ colors:
   armed_key: "#053d26eb"    # the armed key, shown pressed in them
   armed_key_text: "#8cffd1"
   ring: "#40eba1f2"         # around the element about to be clicked
+  charge: "#fac94af2"       # the fill under a held click key
   tile: "#14141a33"         # grid tiles
   tile_border: "#ffffff4d"
   text: "#fffffff5"         # grid letters and window numbers
@@ -94,8 +107,15 @@ elements:
   name works, and if it is a letter the hints and the grid make room by
   leaving that letter out. The same goes for `reset` and `switch`.
 - Several keys can click. `left_click: [minus, space, enter]` clicks on
-  any of the three, and shift with any of them double-clicks. They are
-  one shortcut with three keys on it, not three shortcuts.
+  any of the three. They are one shortcut with three keys on it, not
+  three shortcuts.
+- Shift, ctrl and alt with a click key are passed through: the overlay
+  never holds the keyboard, so the window already knows which modifiers
+  are down when the click lands, and holding one only stops the
+  compositor giving the combination back to the window as a keystroke.
+- A hold is called off by pressing anything else, so a key held by
+  mistake costs nothing. Should a hold somehow outlast its last step by
+  a second, it spends itself rather than sitting there.
 - Excluding letters costs capacity, not correctness: fewer keys means
   more windows need two-key hints, and a window with more targets than
   the keys left can name will use three. Eighteen letters still name

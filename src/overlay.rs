@@ -123,6 +123,30 @@ impl Glide {
     }
 }
 
+/// A click key held down. A tap clicks once, and every step of the hold
+/// after that asks for one more click; another key while it is down calls
+/// the whole thing off.
+struct Charge {
+    button: u32,
+    started: Instant,
+}
+
+impl Charge {
+    /// How far into the hold this is, from 0 at the press to 1 at the last
+    /// step, and how many clicks it stands at now.
+    fn at(&self) -> (f32, u32) {
+        let cfg = &config::get().click;
+        let span = cfg.span().as_secs_f32();
+        let held = self.started.elapsed();
+        let t = if span > 0.0 {
+            (held.as_secs_f32() / span).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (t, cfg.clicks(held))
+    }
+}
+
 /// What a complete hint or tile picked out.
 #[derive(Clone, Copy, PartialEq)]
 enum Target {
@@ -168,10 +192,9 @@ struct App {
     hints: Vec<Hint>,
     /// Keys already confirmed, narrowing the hints.
     typed: String,
-    /// Whether shift is held, which turns the left click key into a double
-    /// click. Only the fallback path needs this; a global shortcut arrives
-    /// already told apart by the compositor.
-    shift: bool,
+    /// A click key held down, and since when. How long it is held decides
+    /// whether the click is single, double or triple.
+    charge: Option<Charge>,
     /// With `keys.confirm` on, a key pressed once and not taken yet: it shows
     /// what it would select, and pressing it again takes it.
     armed: Option<char>,
@@ -292,7 +315,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         aim: None,
         hints: Vec::new(),
         typed: String::new(),
-        shift: false,
+        charge: None,
         armed: None,
         picked: None,
         elements_cache: HashMap::new(),
@@ -382,6 +405,11 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             if let Some(guard) = queue.prepare_read() {
                 let wait = if glide.is_some() {
                     Duration::from_millis(8)
+                } else if app.charging() {
+                    // A held key is drawn, not moved, so it wants frames
+                    // rather than pointer steps: often enough to look like a
+                    // fill, rarely enough that a whole output redraw keeps up.
+                    Duration::from_millis(30)
                 } else {
                     Duration::from_secs(1)
                 };
@@ -398,6 +426,10 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             }
             queue.dispatch_pending(&mut app)?;
             app.process_pending_pick();
+            app.spend_if_overdue();
+            if app.charging() {
+                app.dirty = true;
+            }
             // A picked target wants the pointer on it. Doing that here rather
             // than where it was picked keeps the requests and their roundtrip
             // out of the middle of an event callback.
@@ -541,14 +573,101 @@ impl App {
         None
     }
 
+    /// The button a key clicks with, if it is a click key at all.
+    fn click_button(key: Key) -> Option<u32> {
+        match key {
+            Key::LeftClick => Some(BTN_LEFT),
+            Key::RightClick => Some(BTN_RIGHT),
+            _ => None,
+        }
+    }
+
+    /// Whether a hold is running and drawing, which is what the loop watches
+    /// to keep the fill moving.
+    fn charging(&self) -> bool {
+        self.charge.is_some() && config::get().click.charge
+    }
+
+    /// The box the fill sits under: whatever a click would land on, in global
+    /// logical coordinates.
+    fn charge_target(&self) -> Option<(f64, f64, f64, f64)> {
+        match (self.picked?, self.stage) {
+            ((Target::Hint(i), _), _) => self.hints.get(i).map(|h| (h.rx, h.ry, h.rw, h.rh)),
+            ((Target::Tile(ch), _), Stage::PickTile { win }) => {
+                let w = &self.snap.windows[win];
+                grid::tile_for(w.w as f64, w.h as f64, ch)
+                    .map(|t| (w.x as f64 + t.x, w.y as f64 + t.y, t.w, t.h))
+            }
+            _ => None,
+        }
+    }
+
+    /// A click key going down starts a hold rather than clicking: how long it
+    /// stays down is what says how many clicks are wanted.
+    fn hold(&mut self, button: u32) {
+        if self.picked.is_none() {
+            return;
+        }
+        self.charge = Some(Charge {
+            button,
+            started: Instant::now(),
+        });
+        self.dirty = true;
+    }
+
+    /// A click key coming up spends the hold.
+    fn release(&mut self, key: Key) {
+        let (Some(button), Some(charge)) = (Self::click_button(key), self.charge.take()) else {
+            return;
+        };
+        self.dirty = true;
+        if charge.button != button {
+            return;
+        }
+        self.spend(charge);
+    }
+
+    /// A hold left running long past its last step. Nobody means to hold a
+    /// click key for that long, so either the key is stuck or the release
+    /// never arrived; either way the count has stopped growing and sitting
+    /// here would leave a press that never clicks.
+    fn spend_if_overdue(&mut self) {
+        let overdue = self.charge.as_ref().is_some_and(|c| {
+            c.started.elapsed() > config::get().click.span() + Duration::from_millis(800)
+        });
+        if overdue {
+            if let Some(charge) = self.charge.take() {
+                self.spend(charge);
+            }
+        }
+    }
+
+    fn spend(&mut self, charge: Charge) {
+        let clicks = config::get().click.clicks(charge.started.elapsed());
+        self.click_picked(charge.button, clicks);
+    }
+
     fn press(&mut self, key: Key) {
+        match (&self.charge, Self::click_button(key)) {
+            // Held keys repeat. A repeat is not a second press, and taking it
+            // for one would restart the hold it is meant to be measuring.
+            (Some(c), Some(b)) if c.button == b => return,
+            // Anything else pressed mid-hold calls the click off, which is
+            // how to back out of a hold started by mistake. The key that did
+            // it still means what it means.
+            (Some(_), _) => {
+                self.charge = None;
+                self.dirty = true;
+            }
+            _ => {}
+        }
+        if let Some(button) = Self::click_button(key) {
+            return self.hold(button);
+        }
         let ch = match key {
             Key::Escape => return self.cancel(),
             Key::Backspace => return self.undo(),
             Key::Tab => return self.pick_window(),
-            Key::LeftClick => return self.click_picked(BTN_LEFT, 1),
-            Key::RightClick => return self.click_picked(BTN_RIGHT, 1),
-            Key::DoubleClick => return self.click_picked(BTN_LEFT, 2),
             Key::Reset => return self.reset_or_quit(),
             Key::Switch => return self.switch_mode(),
             Key::Left => return self.step(-1.0, 0.0),
@@ -556,6 +675,8 @@ impl App {
             Key::Up => return self.step(0.0, -1.0),
             Key::Down => return self.step(0.0, 1.0),
             Key::Char(ch) => ch.to_ascii_lowercase(),
+            // Taken above, before anything could cancel a hold.
+            Key::LeftClick | Key::RightClick => return,
         };
         if config::get().keys.confirm {
             // Every key is shown before it is taken: the first press arms it,
@@ -866,6 +987,24 @@ impl App {
 
     fn draw(&mut self) {
         self.dirty = false;
+        // Worked out before the buffer is borrowed, since it reads the hints
+        // and the snapshot that the borrow would tie up.
+        let charge = self
+            .charge
+            .as_ref()
+            .filter(|_| self.charging())
+            .and_then(|c| {
+                let (ex, ey, ew, eh) = self.charge_target()?;
+                let mon = &self.snap.monitor;
+                let s = self.buffer_scale as f64;
+                let rect = Rect::new(
+                    ((ex - mon.x as f64) * s) as f32,
+                    ((ey - mon.y as f64) * s) as f32,
+                    (ew * s) as f32,
+                    (eh * s) as f32,
+                );
+                Some((rect, c.at()))
+            });
         let Some(layer) = self.layer.as_ref() else {
             return;
         };
@@ -908,6 +1047,9 @@ impl App {
                 };
                 draw_pick_hint(&self.snap, win, view, &self.font, &mut canvas, scale)
             }
+        }
+        if let Some((rect, at)) = charge {
+            draw_charge(&mut canvas, rect, at, scale as f32);
         }
         let surface = layer.wl_surface();
         surface.set_buffer_scale(scale);
@@ -970,6 +1112,12 @@ pub fn render(
     };
     canvas.clear(*config::get().colors.dim);
     let w = snap.windows.get(win).ok_or("no such window; see --list")?;
+    // "dw:0.6" is that label picked out with a click key held six tenths of
+    // the way through, which is the only way to look at the fill.
+    let (keys, held) = match keys.split_once(':') {
+        Some((k, f)) => (k, f.parse::<f32>().ok()),
+        None => (keys, None),
+    };
     let els = atspi::clickable_elements(w.pid, &w.title).unwrap_or_else(|e| {
         eprintln!("atspi: {e}");
         Vec::new()
@@ -977,7 +1125,7 @@ pub fn render(
     // Trailing "." means every key confirmed and none armed, the state right
     // after a confirming press.
     let mut typed = keys.to_string();
-    let armed = match typed.strip_suffix('.') {
+    let mut armed = match typed.strip_suffix('.') {
         Some(rest) => {
             typed = rest.to_string();
             None
@@ -986,15 +1134,35 @@ pub fn render(
     };
     if els.is_empty() {
         draw_pick_tile(snap, win, armed, &font, &mut canvas, scale);
-    } else {
-        let hints = hints_for(w, &els);
-        let view = HintView {
-            hints: &hints,
-            typed: &typed,
-            armed,
-            picked: None,
-        };
-        draw_pick_hint(snap, win, view, &font, &mut canvas, scale);
+        return Ok((buf, bw, bh));
+    }
+    let hints = hints_for(w, &els);
+    // A label typed out in full is one that has been picked, not one still
+    // being narrowed down.
+    let picked = hints.iter().position(|h| h.label == keys);
+    if picked.is_some() {
+        typed = keys.to_string();
+        armed = None;
+    }
+    let view = HintView {
+        hints: &hints,
+        typed: &typed,
+        armed,
+        picked,
+    };
+    draw_pick_hint(snap, win, view, &font, &mut canvas, scale);
+    if let (Some(i), Some(t)) = (picked, held) {
+        let h = &hints[i];
+        let mon = &snap.monitor;
+        let el = Rect::new(
+            ((h.rx - mon.x as f64) * scale as f64) as f32,
+            ((h.ry - mon.y as f64) * scale as f64) as f32,
+            (h.rw * scale as f64) as f32,
+            (h.rh * scale as f64) as f32,
+        );
+        let cfg = &config::get().click;
+        let clicks = cfg.clicks(cfg.span().mul_f32(t.clamp(0.0, 1.0)));
+        draw_charge(&mut canvas, el, (t.clamp(0.0, 1.0), clicks), scale as f32);
     }
     Ok((buf, bw, bh))
 }
@@ -1356,6 +1524,45 @@ fn draw_pick_hint(
     }
 }
 
+/// The fill that runs while a click key is held: how far into the hold it is,
+/// and where the next click waits. A thin bar under the target, since the
+/// point is to glance at it, not to watch it.
+fn draw_charge(canvas: &mut Canvas, el: Rect, (t, clicks): (f32, u32), s: f32) {
+    let cfg = config::get();
+    let h = 4.0 * s;
+    let w = el.w.clamp(52.0 * s, 180.0 * s);
+    let x = el.x + (el.w - w) / 2.0;
+    // Under the target, or above it when the target sits on the bottom edge.
+    let below = el.y + el.h + 6.0 * s;
+    let y = if below + h < canvas.h as f32 {
+        below
+    } else {
+        el.y - 6.0 * s - h
+    };
+    let track = Rect::new(x, y, w, h);
+    canvas.round_rect_shadow(track, h / 2.0, 4.0 * s, cfg.colors.shadow.fade(0.7));
+    canvas.round_rect(track, h / 2.0, shade(*cfg.colors.charge, 0.25));
+    if t > 0.0 {
+        // The colour steps with the count, so a glance says which click the
+        // hold has reached without counting notches.
+        let fill = match clicks {
+            1 => *cfg.colors.charge,
+            2 => *cfg.colors.armed,
+            _ => *cfg.colors.ring,
+        };
+        canvas.round_rect(Rect::new(x, y, (w * t).max(h), h), h / 2.0, fill);
+    }
+    // A notch at every step, so the bar says where the next click waits
+    // rather than only how long the key has been down.
+    for f in cfg.click.steps() {
+        if f <= 0.0 || f >= 1.0 {
+            continue;
+        }
+        let notch = Rect::new(x + w * f - 0.75 * s, y - 1.0 * s, 1.5 * s, h + 2.0 * s);
+        canvas.round_rect(notch, 0.0, *cfg.colors.dim);
+    }
+}
+
 /// How wide a label's text is once its characters are spaced out.
 fn label_width(font: &Font, label: &str, px: f32, s: f32) -> f32 {
     let n = label.chars().count().saturating_sub(1) as f32;
@@ -1464,8 +1671,9 @@ impl Dispatch<HyprlandGlobalShortcutV1, Key> for App {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if matches!(event, hyprland_global_shortcut_v1::Event::Pressed { .. }) {
-            state.press(*key);
+        match event {
+            hyprland_global_shortcut_v1::Event::Pressed { .. } => state.press(*key),
+            hyprland_global_shortcut_v1::Event::Released { .. } => state.release(*key),
         }
     }
 }
@@ -1597,10 +1805,6 @@ impl KeyboardHandler for App {
         event: KeyEvent,
     ) {
         if let Some(key) = key_of(&event) {
-            let key = match (key, self.shift) {
-                (Key::LeftClick, true) => Key::DoubleClick,
-                (key, _) => key,
-            };
             self.press(key);
         }
     }
@@ -1610,8 +1814,11 @@ impl KeyboardHandler for App {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: u32,
-        _: KeyEvent,
+        event: KeyEvent,
     ) {
+        if let Some(key) = key_of(&event) {
+            self.release(key);
+        }
     }
     fn update_modifiers(
         &mut self,
@@ -1619,10 +1826,9 @@ impl KeyboardHandler for App {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: u32,
-        modifiers: Modifiers,
+        _: Modifiers,
         _: u32,
     ) {
-        self.shift = modifiers.shift;
     }
 }
 

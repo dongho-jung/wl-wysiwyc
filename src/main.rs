@@ -17,8 +17,9 @@ wl-wysiwyc: keyboard-driven window clicking for Hyprland
 Usage:
   wl-wysiwyc                 interactive: hints the focused window right away,
                              or cancels an overlay that is already up.
-                             Type a hint to arm it, press the same key again
-                             to click. Space switches to the qwerty letter
+                             Type a hint to send the pointer to it, then a
+                             click key (- or Enter) to click; hold that key
+                             to double click. Space switches to the letter
                              grid, Tab picks another window, Esc backs out
   wl-wysiwyc --list          print the windows that would be shown
   wl-wysiwyc --elements [N]  print the clickable elements detected for

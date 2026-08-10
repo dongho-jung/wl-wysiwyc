@@ -137,9 +137,10 @@ fn define_submap(name: &str, keys: &[(String, String)]) -> Result<(), Box<dyn Er
     }
     let mut batch = format!("keyword submap {name} ; ");
     for (id, bind) in keys {
-        // The legacy syntax wants the modifier in its own field.
-        let (mods, key) = match bind.split_once('+') {
-            Some((m, k)) => (m.trim().to_string(), k.trim().to_string()),
+        // The legacy syntax wants the modifiers in one field of their own,
+        // space separated, and the key in the next.
+        let (mods, key) = match bind.rsplit_once('+') {
+            Some((m, k)) => (m.replace('+', " ").trim().to_string(), k.trim().to_string()),
             None => (String::new(), bind.clone()),
         };
         batch.push_str(&format!("keyword bind {mods},{key},global,{APP}:{id} ; "));

@@ -43,9 +43,68 @@ fn load() -> Config {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub keys: Keys,
+    pub click: Click,
     pub label: Label,
     pub colors: Colors,
     pub elements: Elements,
+}
+
+/// What holding a click key down does. A tap clicks once; keeping the key
+/// down asks for the click twice, then three times, which is a steadier way
+/// to double click than pressing anything twice in a row.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Click {
+    /// Hold at least this long for a double click, and this long for a
+    /// triple. Zero on either turns that step off.
+    pub double_ms: u64,
+    pub triple_ms: u64,
+    /// Fill the target as the hold goes on, so the count is something you
+    /// watch rather than count out.
+    pub charge: bool,
+}
+
+impl Default for Click {
+    fn default() -> Self {
+        Click {
+            double_ms: 250,
+            triple_ms: 550,
+            charge: true,
+        }
+    }
+}
+
+impl Click {
+    /// How many clicks a hold of this long asks for.
+    pub fn clicks(&self, held: std::time::Duration) -> u32 {
+        let ms = held.as_millis() as u64;
+        if self.triple_ms > 0 && ms >= self.triple_ms {
+            3
+        } else if self.double_ms > 0 && ms >= self.double_ms {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// The whole hold, from press to the last step, which is what the fill
+    /// measures itself against.
+    pub fn span(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.triple_ms.max(self.double_ms))
+    }
+
+    /// Where along that span the steps are, as fractions.
+    pub fn steps(&self) -> Vec<f32> {
+        let span = self.span().as_millis() as f32;
+        if span <= 0.0 {
+            return Vec::new();
+        }
+        [self.double_ms, self.triple_ms]
+            .into_iter()
+            .filter(|&ms| ms > 0)
+            .map(|ms| ms as f32 / span)
+            .collect()
+    }
 }
 
 /// What the keys do.
@@ -278,6 +337,8 @@ pub struct Colors {
     pub armed_key_text: Hex,
     /// Around the element a further press would click.
     pub ring: Hex,
+    /// The fill that runs while a click key is held.
+    pub charge: Hex,
     /// Grid tiles and the outline around the hinted window.
     pub tile: Hex,
     pub tile_border: Hex,
@@ -297,6 +358,7 @@ impl Default for Colors {
             armed_key: Hex(Color::new(0.02, 0.24, 0.15, 0.92)),
             armed_key_text: Hex(Color::new(0.55, 1.0, 0.82, 1.0)),
             ring: Hex(Color::new(0.25, 0.92, 0.63, 0.95)),
+            charge: Hex(Color::new(0.98, 0.79, 0.29, 0.95)),
             tile: Hex(Color::new(0.08, 0.08, 0.10, 0.20)),
             tile_border: Hex(Color::new(1.0, 1.0, 1.0, 0.30)),
             text: Hex(Color::new(1.0, 1.0, 1.0, 0.96)),
@@ -442,6 +504,32 @@ mod tests {
         // Excluded keys are still bound while the overlay is up, so they do
         // nothing rather than reaching the window underneath.
         assert_eq!(c.keys.taken_letters(), vec!['f']);
+    }
+
+    #[test]
+    fn a_hold_asks_for_more_clicks_the_longer_it_is() {
+        let c = Click::default();
+        let ms = std::time::Duration::from_millis;
+        assert_eq!(c.clicks(ms(0)), 1);
+        assert_eq!(c.clicks(ms(249)), 1);
+        assert_eq!(c.clicks(ms(250)), 2);
+        assert_eq!(c.clicks(ms(549)), 2);
+        assert_eq!(c.clicks(ms(550)), 3);
+        assert_eq!(c.clicks(ms(5000)), 3);
+        assert_eq!(c.span(), ms(550));
+        assert_eq!(c.steps(), vec![250.0 / 550.0, 1.0]);
+
+        // Either step off means a hold never reaches it.
+        let single = Click {
+            double_ms: 0,
+            triple_ms: 0,
+            charge: false,
+        };
+        assert_eq!(single.clicks(ms(9000)), 1);
+        assert!(single.steps().is_empty());
+        let no_triple: Click = serde_yaml::from_str("triple_ms: 0").unwrap();
+        assert_eq!(no_triple.clicks(ms(9000)), 2);
+        assert_eq!(no_triple.span(), ms(250));
     }
 
     #[test]

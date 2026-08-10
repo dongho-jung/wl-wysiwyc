@@ -97,11 +97,26 @@ ignored, so a hint typed at speed is one press per character.
 Completing a hint or picking a grid tile does not click. It puts the
 pointer on that target and stops there, marked green with a ring, and
 then `left_click` (`-` or Enter by default) clicks it, `right_click`
-(`=`) right-clicks it, shift with any left click key double-clicks it,
-and typing another hint moves the target somewhere else. Moving the
-pointer is the point of the pause as much as the choice of button is:
-it is how the window under it shows a hover, and how a menu that only
-opens on hover can be opened at all.
+(`=`) right-clicks it, and typing another hint moves the target
+somewhere else. Moving the pointer is the point of the pause as much as
+the choice of button is: it is how the window under it shows a hover,
+and how a menu that only opens on hover can be opened at all.
+
+Holding a click key asks for more of them. The click lands when the key
+comes up, and how long it was down says how many: a tap clicks once,
+past `click.double_ms` twice, past `click.triple_ms` three times. A
+double click made this way is one gesture rather than two presses
+racing a timer. While the key is down a bar fills under the target with
+a notch at each step, and its colour steps with the count, so the wait
+is something to watch. Anything else pressed calls the hold off, which
+is how to back out of one started by mistake.
+
+Shift, ctrl and alt with a click key reach the window as themselves.
+The overlay never takes the keyboard, so the window under it already
+knows which modifiers are down, and injecting the click while they are
+held is all a shift click is. The submap binds every combination of the
+three to the same shortcut, which is what stops the compositor handing
+the combination back to the window as a keystroke instead.
 
 Two settings change this. `keys.instant` clicks the moment a hint is
 complete, skipping the pause and the choice. `keys.confirm` asks for
@@ -307,8 +322,10 @@ extent, then a left button press and release.
   binary PAM, alpha and all, without showing anything on screen. KEYS
   is a run of presses, all but the last confirmed and the last one
   armed, so `--render out.pam 2 qw` is the overlay with Q confirmed and
-  W armed; a trailing `.` confirms them all and arms nothing. Laid over
-  a screenshot it is exactly what would have been on screen:
+  W armed; a trailing `.` confirms them all and arms nothing. A whole
+  label is a target picked out, and `dw:0.6` picks it out with a click
+  key held six tenths of the way through its hold. Laid over a
+  screenshot it is exactly what would have been on screen:
 
   ```
   grim -o HDMI-A-1 desk.png

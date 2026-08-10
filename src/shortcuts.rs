@@ -53,23 +53,49 @@ pub enum Key {
     Right,
     Up,
     Down,
-    /// Shift and the left click key together: click twice.
-    DoubleClick,
 }
+
+/// The modifier combinations a click key answers to, so that shift, ctrl and
+/// alt reach the window instead of stopping at the overlay.
+///
+/// Nothing is done with them here. The overlay never takes the keyboard, so
+/// the window under it already knows which modifiers are down; injecting the
+/// click while they are held is all a shift click is. Binding them only stops
+/// the compositor handing the combination back to the window as a keystroke.
+/// Each modifier is its own term: the compositor reads what is between the
+/// pluses one at a time and does not know "CTRL SHIFT" as a name.
+const MODS: [&str; 8] = [
+    "",
+    "SHIFT",
+    "CTRL",
+    "ALT",
+    "CTRL + SHIFT",
+    "CTRL + ALT",
+    "SHIFT + ALT",
+    "CTRL + SHIFT + ALT",
+];
 
 impl Key {
     /// The keys the submap presses this shortcut with, which is usually just
-    /// the key's own name. A click can answer to several keys, and a double
-    /// click is any of the left click keys with shift held, so a shortcut is
-    /// not always one binding.
+    /// the key's own name. A click answers to every key the config gave it,
+    /// each with every modifier combination, so a shortcut is not always one
+    /// binding.
     pub fn bindings(self) -> Vec<String> {
         let keys = &crate::config::get().keys;
-        match self {
+        let clicks = match self {
             Key::LeftClick => keys.left(),
             Key::RightClick => keys.right(),
-            Key::DoubleClick => keys.left().iter().map(|k| format!("SHIFT + {k}")).collect(),
-            other => vec![other.name()],
-        }
+            other => return vec![other.name()],
+        };
+        clicks
+            .iter()
+            .flat_map(|k| {
+                MODS.iter().map(move |m| match *m {
+                    "" => k.clone(),
+                    mods => format!("{mods} + {k}"),
+                })
+            })
+            .collect()
     }
 
     /// The shortcut id, which for everything but the click keys is also the
@@ -92,7 +118,6 @@ impl Key {
             Key::Right => "right".into(),
             Key::Up => "up".into(),
             Key::Down => "down".into(),
-            Key::DoubleClick => "double".into(),
         }
     }
 }
@@ -109,7 +134,6 @@ pub fn keys() -> Vec<Key> {
     let mut out = vec![
         Key::LeftClick,
         Key::RightClick,
-        Key::DoubleClick,
         Key::Escape,
         Key::Backspace,
         Key::Tab,
