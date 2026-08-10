@@ -53,6 +53,43 @@ pub enum Key {
     Right,
     Up,
     Down,
+    /// Scroll the window under the pointer.
+    Scroll(Wheel),
+}
+
+/// A scroll: which way, how far, and along which axis. Shift asks for the
+/// end of the document rather than a few notches, ctrl turns the pair of
+/// keys sideways.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Wheel {
+    /// Up, or left when across.
+    pub back: bool,
+    /// All the way, rather than a few notches.
+    pub far: bool,
+    /// Sideways.
+    pub across: bool,
+}
+
+impl Wheel {
+    /// Every direction a pair of scroll keys can be asked for.
+    pub fn every() -> impl Iterator<Item = Wheel> {
+        [false, true].into_iter().flat_map(|back| {
+            [false, true].into_iter().flat_map(move |far| {
+                [false, true]
+                    .into_iter()
+                    .map(move |across| Wheel { back, far, across })
+            })
+        })
+    }
+
+    fn way(self) -> &'static str {
+        match (self.across, self.back) {
+            (false, true) => "up",
+            (false, false) => "down",
+            (true, true) => "left",
+            (true, false) => "right",
+        }
+    }
 }
 
 /// The modifier combinations a click key answers to, so that shift, ctrl and
@@ -82,6 +119,20 @@ impl Key {
     /// binding.
     pub fn bindings(self) -> Vec<String> {
         let keys = &crate::config::get().keys;
+        if let Key::Scroll(w) = self {
+            let key = match (w.back, keys.scroll_up(), keys.scroll_down()) {
+                (true, Some(k), _) | (false, _, Some(k)) => k,
+                _ => return Vec::new(),
+            };
+            let mods: Vec<&str> = [(w.far, "SHIFT"), (w.across, "CTRL")]
+                .into_iter()
+                .filter_map(|(on, m)| on.then_some(m))
+                .collect();
+            return match mods.is_empty() {
+                true => vec![key],
+                false => vec![format!("{} + {key}", mods.join(" + "))],
+            };
+        }
         let clicks = match self {
             Key::LeftClick => keys.left(),
             Key::RightClick => keys.right(),
@@ -118,6 +169,10 @@ impl Key {
             Key::Right => "right".into(),
             Key::Up => "up".into(),
             Key::Down => "down".into(),
+            Key::Scroll(w) => match w.far {
+                true => format!("scroll-{}-far", w.way()),
+                false => format!("scroll-{}", w.way()),
+            },
         }
     }
 }
@@ -152,6 +207,7 @@ pub fn keys() -> Vec<Key> {
     if cfg.switch().is_some() {
         out.push(Key::Switch);
     }
+    out.extend(Wheel::every().map(Key::Scroll));
     out.extend(
         ('a'..='z')
             .chain('1'..='9')
@@ -159,7 +215,7 @@ pub fn keys() -> Vec<Key> {
             .map(Key::Char)
             .filter(|k| !claimed.contains(&k.name())),
     );
-    out.retain(|k| !k.name().is_empty());
+    out.retain(|k| !k.name().is_empty() && !k.bindings().is_empty());
     out
 }
 

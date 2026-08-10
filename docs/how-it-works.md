@@ -111,6 +111,15 @@ a notch at each step, and its colour steps with the count, so the wait
 is something to watch. Anything else pressed calls the hold off, which
 is how to back out of one started by mistake.
 
+`keys.scroll_up` and `keys.scroll_down` (`;` and `'`) turn the wheel
+over whatever the pointer is on, without leaving the overlay: shift
+sends a long run of notches to reach the end, ctrl turns the pair
+sideways. It is the virtual pointer doing it, and the overlay takes no
+pointer input, so the wheel reaches the window underneath exactly as a
+real one would. Scrolling moves everything the hints named, so they go
+as soon as a scroll key is pressed and the window is read again once
+the scrolling settles.
+
 Shift, ctrl and alt with a click key reach the window as themselves.
 The overlay never takes the keyboard, so the window under it already
 knows which modifiers are down, and injecting the click while they are

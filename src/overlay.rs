@@ -7,7 +7,7 @@ use crate::hypr::{self, Snapshot};
 use crate::shortcuts::{
     protocol::hyprland_global_shortcut_v1::{self, HyprlandGlobalShortcutV1},
     protocol::hyprland_global_shortcuts_manager_v1::HyprlandGlobalShortcutsManagerV1,
-    Key, Shortcuts,
+    Key, Shortcuts, Wheel,
 };
 use fontdue::Font;
 use smithay_client_toolkit::{
@@ -195,6 +195,10 @@ struct App {
     /// A click key held down, and since when. How long it is held decides
     /// whether the click is single, double or triple.
     charge: Option<Charge>,
+    /// A scroll waiting for the loop to send it, and when to look at the
+    /// window again once the scrolling stops.
+    scroll: Option<Wheel>,
+    settle: Option<Instant>,
     /// With `keys.confirm` on, a key pressed once and not taken yet: it shows
     /// what it would select, and pressing it again takes it.
     armed: Option<char>,
@@ -316,6 +320,8 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
         hints: Vec::new(),
         typed: String::new(),
         charge: None,
+        scroll: None,
+        settle: None,
         armed: None,
         picked: None,
         elements_cache: HashMap::new(),
@@ -403,7 +409,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             // whichever comes first.
             queue.flush()?;
             if let Some(guard) = queue.prepare_read() {
-                let wait = if glide.is_some() {
+                let wait = if glide.is_some() || app.settle.is_some() {
                     Duration::from_millis(8)
                 } else if app.charging() {
                     // A held key is drawn, not moved, so it wants frames
@@ -427,6 +433,15 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             queue.dispatch_pending(&mut app)?;
             app.process_pending_pick();
             app.spend_if_overdue();
+            if let (Some(wheel), Some(vp)) = (app.scroll.take(), pointer.as_ref()) {
+                send_scroll(vp, wheel);
+                queue.flush()?;
+            }
+            // Everything has moved, so the hints have to be read again. Once
+            // the scrolling stops, not on every press of a key held down.
+            if app.settle.is_some_and(|at| Instant::now() >= at) {
+                app.resettle();
+            }
             if app.charging() {
                 app.dirty = true;
             }
@@ -533,6 +548,38 @@ pub fn move_only(snap: &Snapshot, target: (f64, f64)) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
+/// Turn the wheel over whatever the pointer is on. The overlay takes no
+/// pointer input, so this reaches the window underneath the same way a real
+/// wheel would.
+fn send_scroll(vp: &ZwlrVirtualPointerV1, wheel: Wheel) {
+    let axis = match wheel.across {
+        true => wl_pointer::Axis::HorizontalScroll,
+        false => wl_pointer::Axis::VerticalScroll,
+    };
+    let way = if wheel.back { -1.0 } else { 1.0 };
+    vp.axis_source(wl_pointer::AxisSource::Wheel);
+    // A notch is fifteen units by convention, and the discrete count is what
+    // an application that counts wheel clicks reads.
+    let cfg = &config::get().scroll;
+    let mut left = match wheel.far {
+        // There is no "scroll to the end" on a wheel, only more of it. One
+        // enormous event does not do it: an application is free to clamp what
+        // a single event may move, and several do. A run of ordinary ones
+        // gets there in every application that scrolls at all.
+        true => cfg.far.max(1),
+        false => cfg.step.max(1),
+    } as i32;
+    while left > 0 {
+        let n = left.min(10);
+        left -= n;
+        vp.axis_discrete(0, axis, way * n as f64 * 15.0, (way as i32) * n);
+        vp.frame();
+        if left > 0 {
+            vp.axis_source(wl_pointer::AxisSource::Wheel);
+        }
+    }
+}
+
 fn move_and_click<S>(
     vp: &ZwlrVirtualPointerV1,
     (gx, gy): (f64, f64),
@@ -580,6 +627,36 @@ impl App {
             Key::RightClick => Some(BTN_RIGHT),
             _ => None,
         }
+    }
+
+    /// Scroll the window under the pointer, and forget the hints: they name
+    /// where things were, and where things are is what the scroll changed.
+    /// They come back once the scrolling settles, which is the point at which
+    /// reading the window again is worth the pause.
+    fn roll(&mut self, wheel: Wheel) {
+        if matches!(self.stage, Stage::PickWindow) {
+            return;
+        }
+        self.scroll = Some(wheel);
+        self.settle = Some(Instant::now() + config::get().scroll.settle());
+        self.hints.clear();
+        self.typed.clear();
+        self.armed = None;
+        self.picked = None;
+        self.charge = None;
+        self.dirty = true;
+    }
+
+    /// Read the window again, now that the scrolling has stopped.
+    fn resettle(&mut self) {
+        let win = match self.stage {
+            Stage::PickHint { win } | Stage::PickTile { win } => win,
+            Stage::PickWindow => return,
+        };
+        self.settle = None;
+        self.elements_cache.remove(&win);
+        self.pending_pick = Some(win);
+        self.process_pending_pick();
     }
 
     /// Whether a hold is running and drawing, which is what the loop watches
@@ -674,6 +751,7 @@ impl App {
             Key::Right => return self.step(1.0, 0.0),
             Key::Up => return self.step(0.0, -1.0),
             Key::Down => return self.step(0.0, 1.0),
+            Key::Scroll(w) => return self.roll(w),
             Key::Char(ch) => ch.to_ascii_lowercase(),
             // Taken above, before anything could cancel a hold.
             Key::LeftClick | Key::RightClick => return,

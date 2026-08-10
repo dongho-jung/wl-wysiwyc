@@ -44,6 +44,7 @@ fn load() -> Config {
 pub struct Config {
     pub keys: Keys,
     pub click: Click,
+    pub scroll: Scroll,
     pub label: Label,
     pub colors: Colors,
     pub elements: Elements,
@@ -131,6 +132,11 @@ pub struct Keys {
     /// belongs to it, so pressing it again undoes a wrong turn instead of
     /// doing nothing. Empty means no such key.
     pub reset: String,
+    /// The keys that scroll the window under the pointer while the overlay
+    /// is up. Shift with one scrolls to the end, ctrl scrolls sideways.
+    /// Empty means no such key.
+    pub scroll_up: String,
+    pub scroll_down: String,
     /// The keyboard the labels are laid out on, so that where an element is
     /// on screen decides which key names it.
     pub layout: Layout,
@@ -186,6 +192,8 @@ impl Default for Keys {
             right_click: KeyList(vec!["equal".into()]),
             reset: String::new(),
             switch: "space".into(),
+            scroll_up: "semicolon".into(),
+            scroll_down: "apostrophe".into(),
             layout: Layout::default(),
             excluded: String::new(),
         }
@@ -219,12 +227,23 @@ impl Keys {
             .filter(|k| !self.left().contains(k) && !self.right().contains(k))
     }
 
+    /// The keys that scroll, if they are set.
+    pub fn scroll_up(&self) -> Option<String> {
+        Some(key_name(&self.scroll_up)).filter(|k| !k.is_empty())
+    }
+
+    pub fn scroll_down(&self) -> Option<String> {
+        Some(key_name(&self.scroll_down)).filter(|k| !k.is_empty())
+    }
+
     /// Every key name the overlay has already given a job to.
     pub fn claimed(&self) -> Vec<String> {
         let mut out = self.left();
         out.extend(self.right());
         out.extend(self.reset());
         out.extend(self.switch());
+        out.extend(self.scroll_up());
+        out.extend(self.scroll_down());
         out
     }
 
@@ -288,6 +307,37 @@ fn key_name(key: &str) -> String {
         other => other,
     };
     named.to_string()
+}
+
+/// How much a scroll key moves the window under the pointer.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Scroll {
+    /// Wheel notches per press, the way a mouse wheel counts them.
+    pub step: u32,
+    /// Notches for a press with shift, which is meant to reach the end of
+    /// the document. Raise it for something longer than it gets to.
+    pub far: u32,
+    /// How long after the last scroll to read the window again. Everything
+    /// has moved by then, so the hints have to be worked out afresh, and
+    /// doing that on every press of a key held down would be a waste.
+    pub settle_ms: u64,
+}
+
+impl Default for Scroll {
+    fn default() -> Self {
+        Scroll {
+            step: 3,
+            far: 200,
+            settle_ms: 180,
+        }
+    }
+}
+
+impl Scroll {
+    pub fn settle(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.settle_ms)
+    }
 }
 
 /// Label geometry, in unscaled pixels. Everything here is multiplied by the
@@ -504,6 +554,18 @@ mod tests {
         // Excluded keys are still bound while the overlay is up, so they do
         // nothing rather than reaching the window underneath.
         assert_eq!(c.keys.taken_letters(), vec!['f']);
+    }
+
+    #[test]
+    fn the_scroll_keys_are_claimed_like_any_other() {
+        let c: Config = serde_yaml::from_str("keys:\n  scroll_up: \";\"\n").unwrap();
+        assert_eq!(c.keys.scroll_up().as_deref(), Some("semicolon"));
+        assert_eq!(c.keys.scroll_down().as_deref(), Some("apostrophe"));
+        assert!(c.keys.claimed().contains(&"semicolon".to_string()));
+        let c: Config =
+            serde_yaml::from_str("keys:\n  scroll_up: j\n  scroll_down: \"\"\n").unwrap();
+        assert_eq!(c.keys.scroll_down(), None);
+        assert!(c.keys.reserved_letters().contains(&'j'));
     }
 
     #[test]

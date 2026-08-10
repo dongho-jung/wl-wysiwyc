@@ -37,6 +37,24 @@ keys:
   # here to keep the grid within reach. Empty means none.
   switch: space
 
+  # The keys that scroll the window under the pointer, without leaving
+  # the overlay. Shift with one goes to the end, ctrl turns the pair
+  # sideways, so ctrl scroll_up scrolls left. Empty means none.
+  scroll_up: semicolon
+  scroll_down: apostrophe
+
+scroll:
+  # Wheel notches per press, and per press with shift. There is no
+  # scroll-to-the-end on a wheel, only more of it, so shift sends a run
+  # of notches: raise far for a document it does not get to the end of.
+  step: 3
+  far: 200
+
+  # Reading a window takes long enough to be worth doing once. Scrolling
+  # moves everything the hints named, so they go until this long after
+  # the last scroll, and then the window is read again.
+  settle_ms: 180
+
 click:
   # A click key clicks when it is let go, and how long it was held says
   # how many times: a tap clicks once, holding past double_ms clicks
