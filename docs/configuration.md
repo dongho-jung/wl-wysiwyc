@@ -52,17 +52,11 @@ pointer:
   # times a second while the overlay is open.
   cancel_px: 24
 
-  # The arrow keys fly the pointer rather than move it from one target
-  # to the next: accel_px is how hard a held key pushes, drag is what
-  # slows it down again, and between them they set how fast it can go
-  # (about accel_px over drag). A tap coasts a target or two along; a
-  # hold crosses the window.
-  accel_px: 5200
-  drag: 8.5
-
-  # How near a target has to be to catch the pointer as it slows, which
-  # is also how precisely it can be flown between two of them.
-  snap_px: 70
+  # A press of an arrow key steps to the next target that way. Holding
+  # it steps again after repeat_ms, and each wait after that is shorter
+  # than the last, down to repeat_min_ms.
+  repeat_ms: 280
+  repeat_min_ms: 70
 
   # How far a tap of an arrow key looks for the next target that way.
   # Past this it does nothing rather than throw the pointer across the
@@ -125,6 +119,7 @@ label:
   pad_y: 3.0    # space above and below
   gap: 3.0      # clearance kept between labels
   track: 2.5    # space between a label's characters
+  wake_ms: 700  # how long after the last arrow step the labels return
 
 colors:
   dim: "#00000000"          # laid over the output; add alpha to darken
@@ -137,6 +132,7 @@ colors:
   armed_key_text: "#8cffd1"
   ring: "#40eba1f2"         # around the element about to be clicked
   charge: "#fac94af2"       # the first level of a held click key
+  dot: "#e83e33f0"          # a target while the arrows are stepping
   tile: "#14141a33"         # grid tiles
   tile_border: "#ffffff4d"
   text: "#fffffff5"         # grid letters and window numbers

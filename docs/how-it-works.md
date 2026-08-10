@@ -197,29 +197,28 @@ A press has to land somewhere, and a push of its own would be a nudge
 in an open stretch and three targets in a crowded one, so the press
 names the target and the pointer is pulled to it.
 
-Held past `HOLD`, a fifth of a second, it stops being a press and
-starts being a push. The pointer has weight: it builds speed while the
-key is down until drag balances the push, coasts when it is let go, and
-two keys at once push diagonally. `pointer.accel_px` is the push and
-`pointer.drag` is what slows it, which between them set how fast it can
-go. While it is being flown, whatever it is over is what is picked,
-moment to moment, so the choice follows the pointer.
+Holding the key steps again, and again, quicker the longer it is held:
+`pointer.repeat_ms` before the second step and each wait a little
+shorter than the last down to `pointer.repeat_min_ms`. Holding is for
+covering ground, and covering it a target at a time keeps every landing
+on something.
 
-As a flight slows, something within `pointer.snap_px` catches it and
-reels it the rest of the way in, on a spring damped just under the
-point where it would stop dead. Only something it is heading towards,
-until it has all but stopped: the target it has just left is still well
-within reach and would otherwise take it straight back. And if it comes
-to rest having been caught by nothing, whatever is nearest gets it from
-four times as far, since resting between two labels leaves the pointer
-nowhere.
+It was a push once, with the pointer let off its leash while the key
+was down and caught by whatever it ended up near. That reads as the key
+still being held after it has been let go: the pointer carries on for a
+fifth of a second and lands somewhere nobody chose. Stepping does not
+have the problem, because there is nothing to carry on with.
 
-Both halves refuse to jump. A press finds nothing beyond `reach_px` and
-does nothing at all, which at the end of a row or the bottom of a
-column is the honest answer: every layout has edges, and answering
-"the next one down" with a leap across the window is worse than
-answering it with nothing. Holding the key flies there instead, under
-your own hand.
+A press with nothing beyond `reach_px` does nothing at all, which at
+the end of a row or the bottom of a column is the honest answer: every
+layout has edges, and answering "the next one down" with a leap across
+the window is worse than answering it with nothing.
+
+While the arrows are stepping the labels give way to a dot on each
+target, the one being stepped between lit up and the rest in
+`colors.dot`. What is being watched is one dot moving, and a screen of
+labels is a lot to look through to see it. Typing brings them straight
+back, and so does `label.wake_ms` of not stepping.
 
 Two things stop a flight that will not stop itself. It cannot pass the
 edge of the screen: running off one leaves the pointer parked against

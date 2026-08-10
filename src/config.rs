@@ -327,17 +327,11 @@ pub struct Pointer {
     /// deliberate distance. Zero leaves the overlay up whatever the mouse
     /// does.
     pub cancel_px: f64,
-    /// How hard an arrow key pushes the pointer, in pixels per second per
-    /// second. It is flown rather than sent: a tap nudges it to the next
-    /// thing along, holding builds speed across the window.
-    pub accel_px: f64,
-    /// What slows it down again, as a fraction of its speed per second.
-    /// Together with the push this decides how fast it can go: about
-    /// accel_px over drag.
-    pub drag: f64,
-    /// How near a target has to be to catch the pointer as it slows, and so
-    /// how precisely it can be flown between two of them.
-    pub snap_px: f64,
+    /// How long an arrow key has to be held before it steps a second time,
+    /// and the shortest it will wait between steps once it is going. A held
+    /// key covers ground a target at a time, quicker the longer it is held.
+    pub repeat_ms: u64,
+    pub repeat_min_ms: u64,
     /// How far a tap of an arrow key will reach for the next target that
     /// way, measured between the near edges of the two. Past this it does
     /// nothing rather than throw the pointer across the window, and holding
@@ -355,9 +349,8 @@ impl Default for Pointer {
     fn default() -> Self {
         Pointer {
             cancel_px: 24.0,
-            accel_px: 5200.0,
-            drag: 8.5,
-            snap_px: 70.0,
+            repeat_ms: 280,
+            repeat_min_ms: 70,
             reach_px: 500.0,
             travel_ms: 200,
         }
@@ -365,6 +358,20 @@ impl Default for Pointer {
 }
 
 impl Pointer {
+    /// How long to wait before a held key steps again.
+    pub fn repeat(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.repeat_ms.max(self.repeat_min_ms))
+    }
+
+    /// And how long after that, once it has stepped `n` times: each wait is
+    /// a little shorter than the last, down to the floor, so holding a key
+    /// gathers pace the way holding any key does.
+    pub fn again(&self, n: u32) -> std::time::Duration {
+        let slowest = self.repeat().as_millis() as f64;
+        let wait = slowest * 0.62_f64.powi(n as i32);
+        std::time::Duration::from_millis((wait as u64).max(self.repeat_min_ms))
+    }
+
     /// The pull on the pointer, as the rate of the spring that moves it.
     /// Set from how long a trip should take: a damped spring is settled
     /// after about four and a half of these.
@@ -418,6 +425,16 @@ pub struct Label {
     pub gap: f32,
     /// Space between a label's own characters.
     pub track: f32,
+    /// How long after the last arrow step the labels come back. Stepping
+    /// with the arrows does not need them, and a screen of labels is a lot
+    /// to look at while what you are watching is one dot moving.
+    pub wake_ms: u64,
+}
+
+impl Label {
+    pub fn wake(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.wake_ms)
+    }
 }
 
 impl Default for Label {
@@ -428,6 +445,7 @@ impl Default for Label {
             pad_y: 3.0,
             gap: 3.0,
             track: 2.5,
+            wake_ms: 700,
         }
     }
 }
@@ -455,6 +473,8 @@ pub struct Colors {
     pub ring: Hex,
     /// The fill that runs while a click key is held.
     pub charge: Hex,
+    /// The dot each target wears while the arrows are stepping between them.
+    pub dot: Hex,
     /// Grid tiles and the outline around the hinted window.
     pub tile: Hex,
     pub tile_border: Hex,
@@ -475,6 +495,7 @@ impl Default for Colors {
             armed_key_text: Hex(Color::new(0.55, 1.0, 0.82, 1.0)),
             ring: Hex(Color::new(0.25, 0.92, 0.63, 0.95)),
             charge: Hex(Color::new(0.98, 0.79, 0.29, 0.95)),
+            dot: Hex(Color::new(0.91, 0.24, 0.20, 0.94)),
             tile: Hex(Color::new(0.08, 0.08, 0.10, 0.20)),
             tile_border: Hex(Color::new(1.0, 1.0, 1.0, 0.30)),
             text: Hex(Color::new(1.0, 1.0, 1.0, 0.96)),
