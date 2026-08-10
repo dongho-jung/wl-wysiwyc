@@ -66,7 +66,7 @@ pointer:
   # About how long the pointer takes to reach a target it was sent to
   # by name, by typing a hint. It is pulled there rather than put there,
   # so this sets how hard the pull is rather than timing the trip.
-  travel_ms: 200
+  travel_ms: 280
 
 scroll:
   # Wheel notches per press, and per press with shift. There is no

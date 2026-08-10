@@ -224,9 +224,20 @@ the window is worse than answering it with nothing.
 
 While the arrows are stepping the labels give way to a dot on each
 target, the one being stepped between lit up and the rest in
-`colors.dot`. What is being watched is one dot moving, and a screen of
-labels is a lot to look through to see it. Typing brings them straight
-back, and so does `label.wake_ms` of not stepping.
+`colors.dot`, and a ring around the pointer itself as it slides from
+one to the next. What is being watched is one thing moving, and a
+screen of labels is a lot to look through to see it. Typing brings them
+straight back, and so does `label.wake_ms` of not stepping.
+
+The pointer is pulled to each target by a spring damped a little under
+the point where it would stop dead, so a step leans into the target,
+arrives a hair past it and settles: it starts from nothing, gets going,
+and eases off, rather than appearing at the other end. `travel_ms` sets
+how long that takes. With the labels down there is little enough on
+screen to draw every step of the journey, seven to sixteen milliseconds
+a frame against thirty to forty-five with them up, which is what makes
+a journey of two hundred milliseconds something you can watch rather
+than two states swapping.
 
 Two things stop a flight that will not stop itself. It cannot pass the
 edge of the screen: running off one leaves the pointer parked against

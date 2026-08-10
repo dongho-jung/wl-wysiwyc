@@ -352,7 +352,7 @@ impl Default for Pointer {
             repeat_ms: 280,
             repeat_min_ms: 70,
             reach_px: 500.0,
-            travel_ms: 200,
+            travel_ms: 280,
         }
     }
 }

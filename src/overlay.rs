@@ -208,12 +208,14 @@ impl Drift {
     /// The step itself, given how long it is. Apart from the clock this is
     /// all there is to the motion, so it is where the numbers can be checked.
     fn advance(&mut self, dt: f64, wall: (f64, f64)) -> bool {
-        // A spring, damped just under the point where it would stop dead, so
-        // that the pointer settles onto the target rather than halting on it.
+        // A spring, damped a little under the point where it would stop
+        // dead. Under-damping is what gives the movement its tension: it
+        // leans into the target, arrives a hair past it and settles back,
+        // rather than creeping to a halt.
         let w = config::get().pointer.spring();
         let (dx, dy) = (self.to.0 - self.at.0, self.to.1 - self.at.1);
-        self.vel.0 += (dx * w * w - self.vel.0 * 1.6 * w) * dt;
-        self.vel.1 += (dy * w * w - self.vel.1 * 1.6 * w) * dt;
+        self.vel.0 += (dx * w * w - self.vel.0 * 1.35 * w) * dt;
+        self.vel.1 += (dy * w * w - self.vel.1 * 1.35 * w) * dt;
         self.at.0 += self.vel.0 * dt;
         self.at.1 += self.vel.1 * dt;
         // Screens have edges, and a number that runs off one leaves the
@@ -227,7 +229,10 @@ impl Drift {
                 *vel = 0.0;
             }
         }
-        dx.hypot(dy) < 0.7 && self.speed() < 15.0
+        // Near enough and slow enough to call it arrived. Chasing the last
+        // fraction of a pixel keeps the loop busy for another quarter of a
+        // second and looks like nothing at all.
+        dx.hypot(dy) < 1.5 && self.speed() < 25.0
     }
 }
 
@@ -318,6 +323,9 @@ struct App {
     /// has, which is what makes it speed up.
     held: [Option<Instant>; 4],
     steps: [u32; 4],
+    /// Where the pointer is right now, which while it is travelling is
+    /// somewhere between two targets and worth drawing.
+    pointer: Option<(f64, f64)>,
     /// Whether the last frame drawn was dots rather than labels, so that the
     /// labels coming back is a frame and not a wait for one.
     showed_dots: bool,
@@ -453,6 +461,7 @@ pub fn run(
         lit: None,
         held: [None; 4],
         steps: [0; 4],
+        pointer: None,
         showed_dots: false,
         stepping: None,
         elements_cache: HashMap::new(),
@@ -732,11 +741,16 @@ pub fn run(
                 let caught = (d.to.0 - d.at.0).hypot(d.to.1 - d.at.1) < CAUGHT;
                 move_and_click(vp, d.at, extent, None, &mut queue, &mut app)?;
                 pointer_at = Some(d.at);
-                // What it is heading for lights up when it gets there, not
-                // when the key went down: a whole output costs tens of
-                // milliseconds to paint, and painting one mid-flight is what
-                // would make the flight look stepped.
-                if caught || done {
+                app.pointer = Some(d.at);
+                // With the labels out of the way there is little enough on
+                // screen to draw it every step of the journey, and a journey
+                // drawn every step is one you can watch. With them up it
+                // costs tens of milliseconds a frame, so only the arrival is
+                // drawn: painting one mid-way is what would make it stutter.
+                if app.dots() {
+                    app.dirty = true;
+                    app.light_up(d.at);
+                } else if caught || done {
                     app.light_up(d.at);
                 }
                 if done {
@@ -1581,6 +1595,7 @@ impl App {
                     },
                     stale: self.settle.is_some(),
                     dots,
+                    pointer: self.pointer,
                 };
                 draw_pick_hint(&self.snap, win, view, &self.font, &mut canvas, scale)
             }
@@ -1808,6 +1823,9 @@ pub fn render(
         stale: false,
         // "dots" asks for the view the arrow keys leave behind.
         dots: keys == "dots",
+        pointer: hints
+            .get(hints.len() / 3)
+            .map(|h| (h.cx + 40.0, h.cy + 12.0)),
     };
     draw_pick_hint(snap, win, view, &font, &mut canvas, scale);
     if let Some(i) = picked {
@@ -2081,6 +2099,8 @@ struct HintView<'a> {
     stale: bool,
     /// The arrows are stepping, so the labels give way to a dot apiece.
     dots: bool,
+    /// Where the pointer is, when it is worth drawing: on its way somewhere.
+    pointer: Option<(f64, f64)>,
 }
 
 fn draw_pick_hint(
@@ -2098,6 +2118,7 @@ fn draw_pick_hint(
         picked,
         stale,
         dots,
+        pointer,
     } = view;
     // How much of itself a label is showing. Stale ones step back.
     let lit = |c: Color| if stale { c.fade(0.55) } else { c };
@@ -2119,24 +2140,45 @@ fn draw_pick_hint(
     let w = &snap.windows[win];
     let s = scale as f32;
     let px = config::get().label.size * s;
-    canvas.round_rect_outline(
-        Rect::new(
-            ((w.x - mon.x) * scale) as f32,
-            ((w.y - mon.y) * scale) as f32,
-            (w.w * scale) as f32,
-            (w.h * scale) as f32,
-        )
-        .grow(-s),
-        8.0 * s,
-        1.5 * s,
-        *config::get().colors.tile_border,
-    );
+    // The outline around the window is a long perimeter to measure, and it
+    // says which window is being worked on. While stepping that is settled
+    // and the frame wants to be cheap, since it is drawn every step of the
+    // way.
+    if !dots {
+        canvas.round_rect_outline(
+            Rect::new(
+                ((w.x - mon.x) * scale) as f32,
+                ((w.y - mon.y) * scale) as f32,
+                (w.w * scale) as f32,
+                (w.h * scale) as f32,
+            )
+            .grow(-s),
+            8.0 * s,
+            1.5 * s,
+            *config::get().colors.tile_border,
+        );
+    }
     // Stepping with the arrows: a dot on each target and nothing else, so
     // that the one being moved between them is the thing on screen.
     if dots {
+        // Where the pointer is at this instant, drawn as the thing that
+        // moves. The dots stay put; this slides between them, and watching
+        // it is how the movement reads as movement.
+        if let Some((px, py)) = pointer {
+            let d = 13.0 * s;
+            let spot = Rect::new(
+                ((px - mon.x as f64) * scale as f64) as f32 - d / 2.0,
+                ((py - mon.y as f64) * scale as f64) as f32 - d / 2.0,
+                d,
+                d,
+            );
+            let glow = *config::get().colors.ring;
+            canvas.round_rect_shadow(spot.grow(2.0 * s), d, 9.0 * s, glow.fade(0.42));
+            canvas.round_rect_outline(spot, d / 2.0, 2.0 * s, glow);
+        }
         for (i, h) in hints.iter().enumerate() {
             let hot = picked == Some(i);
-            let d = (if hot { 10.0 } else { 6.0 }) * s;
+            let d = (if hot { 9.0 } else { 6.0 }) * s;
             let spot = Rect::new(
                 ((h.cx - mon.x as f64) * scale as f64) as f32 - d / 2.0,
                 ((h.cy - mon.y as f64) * scale as f64) as f32 - d / 2.0,
@@ -2661,20 +2703,25 @@ mod tests {
         Rect::new(x, y, w, h)
     }
 
-    /// Step to a target and watch the pointer get there.
-    fn travel(from: (f64, f64), to: (f64, f64)) -> (u32, f64) {
+    /// Step to a target and watch the pointer get there: how long until it
+    /// has covered all but a twentieth of the way, how long until it settles,
+    /// and how far past the target it went.
+    fn travel(from: (f64, f64), to: (f64, f64)) -> (u32, u32, f64) {
         let mut d = Drift::new(from, to);
-        let mut ticks = 0;
-        let mut furthest: f64 = 0.0;
+        let span = to.0 - from.0;
+        let (mut ticks, mut mostly, mut furthest) = (0u32, 0u32, 0.0f64);
         for _ in 0..400 {
             ticks += 1;
             let done = d.advance(0.008, WALL);
+            if mostly == 0 && (d.at.0 - from.0).abs() >= span.abs() * 0.95 {
+                mostly = ticks;
+            }
             furthest = furthest.max(d.at.0 - to.0);
             if done {
                 break;
             }
         }
-        (ticks, furthest)
+        (mostly * 8, ticks * 8, furthest)
     }
 
     #[test]
@@ -2733,13 +2780,18 @@ mod tests {
     }
 
     #[test]
-    fn a_step_arrives_and_settles() {
-        let (ticks, past) = travel((0.0, 0.0), (300.0, 0.0));
-        let ms = ticks * 8;
-        assert!((80..400).contains(&ms), "a step took {ms}ms");
-        // A little past the target and back is the point; a long way past it
-        // is a pointer that has to be chased.
-        assert!(past < 20.0, "overshot by {past:.0}px");
+    fn a_step_eases_in_and_out() {
+        let (mostly, settled, past) = travel((0.0, 0.0), (300.0, 0.0));
+        // Long enough to be a movement rather than a jump, short enough not
+        // to be waited on.
+        assert!(
+            (120..420).contains(&mostly),
+            "a step covered itself in {mostly}ms"
+        );
+        assert!(settled < 700, "and took {settled}ms to settle");
+        // A hair past the target and back is the tension in it; a long way
+        // past is a pointer to be chased.
+        assert!((2.0..40.0).contains(&past), "overshot by {past:.0}px");
     }
 
     #[test]
