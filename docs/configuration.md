@@ -51,9 +51,9 @@ scroll:
   far: 200
 
   # Reading a window takes long enough to be worth doing once. Scrolling
-  # moves everything the hints named, so they go until this long after
+  # moves everything the hints named, so they fade until this long after
   # the last scroll, and then the window is read again.
-  settle_ms: 180
+  settle_ms: 120
 
 click:
   # A click key clicks when it is let go, and how long it was held says
@@ -64,8 +64,9 @@ click:
   triple_ms: 800
 
   # Show the charge while the key is down: a ring closing in on the
-  # target as the step fills, and a pip for each click reached, so the
-  # count is watched rather than timed in the head.
+  # target as the step fills, a wave as it lands, and a badge saying
+  # what letting go now would click, rather than a count timed in the
+  # head.
   charge: true
 
   # The keyboard the labels are laid out on, so that where something is
@@ -133,8 +134,8 @@ elements:
   are down when the click lands, and holding one only stops the
   compositor giving the combination back to the window as a keystroke.
 - A hold is called off by pressing anything else, so a key held by
-  mistake costs nothing. Should a hold somehow outlast its last step by
-  a second, it spends itself rather than sitting there.
+  mistake costs nothing, and nothing is clicked until the key comes up
+  however long it is held.
 - Excluding letters costs capacity, not correctness: fewer keys means
   more windows need two-key hints, and a window with more targets than
   the keys left can name will use three. Eighteen letters still name

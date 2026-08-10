@@ -262,7 +262,7 @@ pub fn watch_bounds(el: &Element) -> Option<Receiver<()>> {
     let (dest, path) = (el.dest.clone(), el.path.clone());
     let mut last = extents_of(&conn, &dest, &path);
     std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(120));
+        std::thread::sleep(Duration::from_millis(45));
         let now = extents_of(&conn, &dest, &path);
         if now != last {
             last = now;

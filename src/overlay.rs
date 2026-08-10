@@ -409,7 +409,7 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
                 } else if app.watch.is_some() {
                     // Often enough to catch a scroll that went past the
                     // overlay; the check itself is one message.
-                    Duration::from_millis(60)
+                    Duration::from_millis(40)
                 } else if app.charging() {
                     // A held key is drawn, not moved, so it wants frames
                     // rather than pointer steps: often enough to look like a
@@ -431,7 +431,6 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             }
             queue.dispatch_pending(&mut app)?;
             app.process_pending_pick();
-            app.spend_if_overdue();
             if let (Some(wheel), Some(vp)) = (app.scroll.take(), pointer.as_ref()) {
                 send_scroll(vp, wheel);
                 queue.flush()?;
@@ -651,15 +650,11 @@ impl App {
         if matches!(self.stage, Stage::PickWindow) {
             return;
         }
+        self.dirty |= self.settle.is_none();
         self.settle = Some(Instant::now() + config::get().scroll.settle());
-        if !self.hints.is_empty() {
-            self.hints.clear();
-            self.typed.clear();
-            self.armed = None;
-            self.picked = None;
-            self.charge = None;
-            self.dirty = true;
-        }
+        self.typed.clear();
+        self.armed = None;
+        self.charge = None;
     }
 
     /// Read the window again, now that the scrolling has stopped.
@@ -697,7 +692,7 @@ impl App {
     /// A click key going down starts a hold rather than clicking: how long it
     /// stays down is what says how many clicks are wanted.
     fn hold(&mut self, button: u32) {
-        if self.picked.is_none() {
+        if self.picked.is_none() || self.settle.is_some() {
             return;
         }
         self.charge = Some(Charge {
@@ -717,21 +712,6 @@ impl App {
             return;
         }
         self.spend(charge);
-    }
-
-    /// A hold left running long past its last step. Nobody means to hold a
-    /// click key for that long, so either the key is stuck or the release
-    /// never arrived; either way the count has stopped growing and sitting
-    /// here would leave a press that never clicks.
-    fn spend_if_overdue(&mut self) {
-        let overdue = self.charge.as_ref().is_some_and(|c| {
-            c.started.elapsed() > config::get().click.span() + Duration::from_millis(800)
-        });
-        if overdue {
-            if let Some(charge) = self.charge.take() {
-                self.spend(charge);
-            }
-        }
     }
 
     fn spend(&mut self, charge: Charge) {
@@ -789,6 +769,11 @@ impl App {
 
     /// Act on a key, now that it is meant.
     fn take(&mut self, ch: char) {
+        // The labels on screen name where things were until the window has
+        // been read again.
+        if self.settle.is_some() {
+            return;
+        }
         self.dirty = true;
         self.fresh = false;
         match self.stage {
@@ -892,6 +877,9 @@ impl App {
     /// the search widen to a cone, so leaving the end of a row still goes
     /// somewhere sensible rather than nowhere.
     fn step(&mut self, dx: f64, dy: f64) {
+        if self.settle.is_some() {
+            return;
+        }
         /// How far off the line a target can be and still count as in line,
         /// in logical pixels: about a row of text.
         const IN_LINE: f64 = 24.0;
@@ -1149,12 +1137,13 @@ impl App {
                         Some((Target::Hint(i), _)) => Some(i),
                         _ => None,
                     },
+                    stale: self.settle.is_some(),
                 };
                 draw_pick_hint(&self.snap, win, view, &self.font, &mut canvas, scale)
             }
         }
         if let Some((rect, at)) = charge {
-            draw_charge(&mut canvas, rect, at, scale as f32);
+            draw_charge(&mut canvas, rect, at, &self.font, scale as f32);
         }
         let surface = layer.wl_surface();
         surface.set_buffer_scale(scale);
@@ -1237,8 +1226,28 @@ pub fn render(
         }
         None => typed.pop(),
     };
+    let charge = |canvas: &mut Canvas, el: Rect| {
+        if let Some(t) = held {
+            let cfg = &config::get().click;
+            let stage = cfg.stage(cfg.span().mul_f32(t.clamp(0.0, 1.0)));
+            draw_charge(canvas, el, stage, &font, scale as f32);
+        }
+    };
     if els.is_empty() {
         draw_pick_tile(snap, win, armed, &font, &mut canvas, scale);
+        // A whole tile letter is a tile picked out, the same as a whole label.
+        if let Some(t) = keys.chars().next().filter(|_| keys.chars().count() == 1) {
+            if let Some(tile) = grid::tile_for(w.w as f64, w.h as f64, t) {
+                let mon = &snap.monitor;
+                let el = Rect::new(
+                    ((w.x - mon.x) as f64 + tile.x) as f32 * scale as f32,
+                    ((w.y - mon.y) as f64 + tile.y) as f32 * scale as f32,
+                    tile.w as f32 * scale as f32,
+                    tile.h as f32 * scale as f32,
+                );
+                charge(&mut canvas, el);
+            }
+        }
         return Ok((buf, bw, bh));
     }
     let hints = hints_for(w, &els);
@@ -1254,20 +1263,21 @@ pub fn render(
         typed: &typed,
         armed,
         picked,
+        stale: false,
     };
     draw_pick_hint(snap, win, view, &font, &mut canvas, scale);
-    if let (Some(i), Some(t)) = (picked, held) {
+    if let Some(i) = picked {
         let h = &hints[i];
         let mon = &snap.monitor;
-        let el = Rect::new(
-            ((h.rx - mon.x as f64) * scale as f64) as f32,
-            ((h.ry - mon.y as f64) * scale as f64) as f32,
-            (h.rw * scale as f64) as f32,
-            (h.rh * scale as f64) as f32,
+        charge(
+            &mut canvas,
+            Rect::new(
+                ((h.rx - mon.x as f64) * scale as f64) as f32,
+                ((h.ry - mon.y as f64) * scale as f64) as f32,
+                (h.rw * scale as f64) as f32,
+                (h.rh * scale as f64) as f32,
+            ),
         );
-        let cfg = &config::get().click;
-        let stage = cfg.stage(cfg.span().mul_f32(t.clamp(0.0, 1.0)));
-        draw_charge(&mut canvas, el, stage, scale as f32);
     }
     Ok((buf, bw, bh))
 }
@@ -1520,6 +1530,11 @@ struct HintView<'a> {
     armed: Option<char>,
     /// The hint a completed label picked out, waiting for a click key.
     picked: Option<usize>,
+    /// The window moved and these labels have not caught up. They are still
+    /// drawn, faded, rather than taken away: a label that goes out and comes
+    /// back is two flinches where fading is none, and the fade says by itself
+    /// that they are not to be typed yet.
+    stale: bool,
 }
 
 fn draw_pick_hint(
@@ -1535,7 +1550,10 @@ fn draw_pick_hint(
         typed,
         armed,
         picked,
+        stale,
     } = view;
+    // How much of itself a label is showing. Stale ones step back.
+    let lit = |c: Color| if stale { c.fade(0.3) } else { c };
     // What the armed key would leave behind, which is what it previews.
     let preview = armed.map(|ch| format!("{typed}{ch}"));
     // One candidate left means the next press takes it, so it is worth more
@@ -1583,17 +1601,17 @@ fn draw_pick_hint(
             // them would answer a question the press has only asked.
             let (ring, bg, edge, text) = if hot {
                 (
-                    *config::get().colors.ring,
-                    *config::get().colors.armed,
-                    armed_edge(),
-                    *config::get().colors.armed_text,
+                    lit(*config::get().colors.ring),
+                    lit(*config::get().colors.armed),
+                    lit(armed_edge()),
+                    lit(*config::get().colors.armed_text),
                 )
             } else {
                 (
-                    shade(*config::get().colors.hint, 0.5),
-                    *config::get().colors.hint,
-                    hint_edge(),
-                    *config::get().colors.hint_text,
+                    lit(shade(*config::get().colors.hint, 0.5)),
+                    lit(*config::get().colors.hint),
+                    lit(hint_edge()),
+                    lit(*config::get().colors.hint_text),
                 )
             };
             // Only the element about to be clicked is outlined. Ringing
@@ -1606,19 +1624,19 @@ fn draw_pick_hint(
                     (h.rw * scale as f64) as f32,
                     (h.rh * scale as f64) as f32,
                 );
-                canvas.round_rect_shadow(el, 4.0 * s, 6.0 * s, armed_glow().fade(0.45));
+                canvas.round_rect_shadow(el, 4.0 * s, 6.0 * s, lit(armed_glow().fade(0.45)));
                 canvas.round_rect_outline(el, 4.0 * s, 2.0 * s, ring);
             }
             let r = b.rect();
             let radius = r.h * 0.3;
             if hot && clinches {
-                canvas.round_rect_shadow(r, radius, 7.0 * s, armed_glow());
+                canvas.round_rect_shadow(r, radius, 7.0 * s, lit(armed_glow()));
             } else {
                 canvas.round_rect_shadow(
                     r.shift(0.0, 1.2 * s),
                     radius,
                     3.5 * s,
-                    *config::get().colors.shadow,
+                    lit(*config::get().colors.shadow),
                 );
             }
             canvas.round_rect(r, radius, bg);
@@ -1632,23 +1650,33 @@ fn draw_pick_hint(
 /// The charge on a held click key: what it has stored up, and what is coming.
 ///
 /// A ring gathers in on the target as the step fills and lands on it when the
-/// count goes up, the target's own outline thickens and glows with what is
-/// stored, and a row of pips underneath says how many clicks that is, since a
-/// glow on its own cannot be counted.
-fn draw_charge(canvas: &mut Canvas, el: Rect, (level, frac): (u32, f32), s: f32) {
+/// count goes up, a wave breaks outward at the moment it does, the target's
+/// own outline thickens and glows with what is stored, and a badge says the
+/// count outright. The badge is the part that answers the only question that
+/// matters while holding: let go now, and how many clicks is that?
+fn draw_charge(canvas: &mut Canvas, el: Rect, (level, frac): (u32, f32), font: &Font, s: f32) {
     let cfg = config::get();
     let tone = |n: u32| match n {
         0 | 1 => *cfg.colors.charge,
         2 => *cfg.colors.armed,
         _ => *cfg.colors.ring,
     };
+    let ink = |n: u32| match n {
+        0 | 1 => *cfg.colors.hint_text,
+        _ => *cfg.colors.armed_text,
+    };
     let radius = 5.0 * s;
     let here = tone(level);
     let top = cfg.click.levels();
 
     // What is stored: the target sits inside a ring that grows with it.
-    canvas.round_rect_shadow(el, radius, (7.0 + 4.0 * level as f32) * s, here.fade(0.32));
-    canvas.round_rect_outline(el, radius, (1.2 + 0.8 * level as f32) * s, here);
+    canvas.round_rect_shadow(el, radius, (7.0 + 4.0 * level as f32) * s, here.fade(0.34));
+    canvas.round_rect_outline(el, radius, (1.2 + 0.9 * level as f32) * s, here);
+    // Nothing more is coming, and the target says so by wearing a second ring.
+    if level >= top {
+        let pad = 5.0 * s;
+        canvas.round_rect_outline(el.grow(pad), radius + pad, 1.4 * s, here.fade(0.55));
+    }
 
     // What is coming: a ring closing in, quicker the nearer it gets, so the
     // moment it lands is the moment the count goes up.
@@ -1663,29 +1691,52 @@ fn draw_charge(canvas: &mut Canvas, el: Rect, (level, frac): (u32, f32), s: f32)
         );
     }
 
-    // How many clicks the hold stands at. Under the target, or over it when
-    // the target sits on the bottom edge.
-    if top < 2 {
-        return;
+    // And the wave off the one that just landed, which is what makes a step
+    // something you feel rather than something you notice afterwards.
+    if level > 1 && frac < 0.35 {
+        let k = frac / 0.35;
+        let pad = (2.0 + 30.0 * k) * s;
+        canvas.round_rect_outline(
+            el.grow(pad),
+            radius + pad,
+            (2.5 - 1.6 * k) * s,
+            here.fade((1.0 - k) * (1.0 - k) * 0.8),
+        );
     }
-    let (d, gap) = (5.0 * s, 4.0 * s);
-    let wide = top as f32 * d + (top - 1) as f32 * gap;
-    let x0 = el.x + (el.w - wide) / 2.0;
-    let below = el.y + el.h + 8.0 * s;
-    let y = if below + d < canvas.h as f32 {
-        below
-    } else {
-        el.y - 8.0 * s - d
-    };
-    for i in 0..top {
-        let pip = Rect::new(x0 + i as f32 * (d + gap), y, d, d);
-        canvas.round_rect_shadow(pip, d / 2.0, 3.0 * s, shade(*cfg.colors.shadow, 0.85));
-        let fill = match i < level {
-            true => tone(i + 1),
-            false => shade(*cfg.colors.text, 0.30),
-        };
-        canvas.round_rect(pip, d / 2.0, fill);
-    }
+
+    // The count, in as many words. A badge over the target, or under it when
+    // the target sits against the top of the screen.
+    let px = cfg.label.size * 1.3 * s;
+    let text = format!("x{level}");
+    let (pad_x, pad_y) = (cfg.label.pad_x * s, cfg.label.pad_y * s);
+    let bw = draw::text_width(font, &text, px) + 2.0 * pad_x;
+    let bh = px + 2.0 * pad_y;
+    let above = el.y - bh - 7.0 * s;
+    let badge = Rect::new(
+        el.x + (el.w - bw) / 2.0,
+        if above > 0.0 {
+            above
+        } else {
+            (el.y + el.h + 7.0 * s).min(canvas.h as f32 - bh)
+        },
+        bw,
+        bh,
+    );
+    canvas.round_rect_shadow(
+        badge.shift(0.0, 1.5 * s),
+        bh * 0.35,
+        5.0 * s,
+        shade(*cfg.colors.shadow, 0.75),
+    );
+    canvas.round_rect(badge, bh * 0.35, here);
+    canvas.text_centered(
+        font,
+        &text,
+        badge.x + bw / 2.0,
+        badge.y + bh / 2.0,
+        px,
+        ink(level),
+    );
 }
 
 /// How wide a label's text is once its characters are spaced out.

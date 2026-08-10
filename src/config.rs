@@ -336,7 +336,7 @@ impl Default for Scroll {
         Scroll {
             step: 3,
             far: 200,
-            settle_ms: 180,
+            settle_ms: 120,
         }
     }
 }

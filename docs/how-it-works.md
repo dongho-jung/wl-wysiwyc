@@ -108,25 +108,31 @@ past `click.double_ms` twice, past `click.triple_ms` three times. A
 double click made this way is one gesture rather than two presses
 racing a timer. While the key is down the charge is drawn on the
 target: a ring gathers in on it as the step fills and lands as the
-count goes up, the target's own outline thickens with what is stored,
-and a pip lights underneath for each click the hold has reached, since
-a glow on its own cannot be counted. Anything else pressed calls the
-hold off, which is how to back out of one started by mistake.
+count goes up, a wave breaks outward as it lands, the target's own
+outline thickens with what is stored, and a badge over it says the
+count outright, since a glow cannot be counted. The badge answers the
+only question worth asking mid-hold: let go now, and how many clicks is
+that? Nothing happens until the key comes up, however long it is held.
+Anything else pressed calls the hold off, which is how to back out of
+one started by mistake.
 
 `keys.scroll_up` and `keys.scroll_down` (`;` and `'`) turn the wheel
 over whatever the pointer is on, without leaving the overlay: shift
 sends a long run of notches to reach the end, ctrl turns the pair
 sideways. It is the virtual pointer doing it, and the overlay takes no
 pointer input, so the wheel reaches the window underneath exactly as a
-real one would. Scrolling moves everything the hints named, so they go
-as soon as a scroll key is pressed and the window is read again once
-the scrolling settles.
+real one would. Scrolling moves everything the hints named, so from the
+first press they are drawn faded and answer to nothing, and the window
+is read again once the scrolling settles. Fading rather than clearing
+them is deliberate: labels that go out and come back are two flinches
+where a fade is none, and the fade says by itself that they are not to
+be typed yet.
 
 A wheel turned by hand does the same thing without saying so: the
 overlay takes no pointer input, so the scroll goes straight past it and
 the labels are left naming where things were. One element near the
 middle of the window is asked where it is eight times a second, which
-is a single message, and the labels go and come back the same way as
+is a single message, and the labels fade and come back the same way as
 for a scroll key. The middle is where the answer means something: the
 chrome around a page does not move when the page does.
 
