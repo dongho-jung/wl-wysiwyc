@@ -233,11 +233,19 @@ The pointer is pulled to each target by a spring damped a little under
 the point where it would stop dead, so a step leans into the target,
 arrives a hair past it and settles: it starts from nothing, gets going,
 and eases off, rather than appearing at the other end. `travel_ms` sets
-how long that takes. With the labels down there is little enough on
+how long that takes.
+
+A held key pulls harder than that, as hard as it needs to arrive before
+the next step is due. A step worth watching takes longer than the
+seventy milliseconds between steps at the end of a hold, and a pointer
+that cannot keep up falls further behind with every one: letting go then
+leaves it several targets adrift, walking the focus through all of them
+on its way to the last. The pull follows the cadence, so the pointer is
+where the key left it. With the labels down there is little enough on
 screen to draw every step of the journey, seven to sixteen milliseconds
-a frame against thirty to forty-five with them up, which is what makes
-a journey of two hundred milliseconds something you can watch rather
-than two states swapping.
+a frame against thirty to forty-five with them up, which is what makes a
+journey of two hundred milliseconds something you can watch rather than
+two states swapping.
 
 Two things stop a flight that will not stop itself. It cannot pass the
 edge of the screen: running off one leaves the pointer parked against

@@ -166,6 +166,11 @@ enum Stage {
 struct Drift {
     at: (f64, f64),
     vel: (f64, f64),
+    /// How hard it is pulled, in radians a second. Set by whoever aimed it:
+    /// a step taken on its own is worth watching and takes its time, while
+    /// steps coming every seventy milliseconds have to be got through in
+    /// seventy milliseconds or the pointer falls behind the key.
+    rate: f64,
     /// What is pulling it. A further press moves this without taking away
     /// the speed the pointer already has, so stepping quickly runs the
     /// targets together into one movement rather than a series of darts.
@@ -174,10 +179,11 @@ struct Drift {
 }
 
 impl Drift {
-    fn new(at: (f64, f64), to: (f64, f64)) -> Self {
+    fn new(at: (f64, f64), to: (f64, f64), rate: f64) -> Self {
         Drift {
             at,
             vel: (0.0, 0.0),
+            rate,
             to,
             stepped: Instant::now(),
         }
@@ -212,7 +218,7 @@ impl Drift {
         // dead. Under-damping is what gives the movement its tension: it
         // leans into the target, arrives a hair past it and settles back,
         // rather than creeping to a halt.
-        let w = config::get().pointer.spring();
+        let w = self.rate;
         let (dx, dy) = (self.to.0 - self.at.0, self.to.1 - self.at.1);
         self.vel.0 += (dx * w * w - self.vel.0 * 1.35 * w) * dt;
         self.vel.1 += (dy * w * w - self.vel.1 * 1.35 * w) * dt;
@@ -253,7 +259,7 @@ impl Charge {
 }
 
 /// What a complete hint or tile picked out.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Target {
     Hint(usize),
     Tile(char),
@@ -294,8 +300,10 @@ struct App {
     target: Option<(f64, f64)>,
     button: u32,
     clicks: u32,
-    /// Where to send the pointer, once the loop can get to it.
+    /// Where to send the pointer, once the loop can get to it, and how hard
+    /// to pull it there.
     aim: Option<(f64, f64)>,
+    rate: f64,
     hints: Vec<Hint>,
     /// Keys already confirmed, narrowing the hints.
     typed: String,
@@ -450,6 +458,7 @@ pub fn run(
         button: BTN_LEFT,
         clicks: 1,
         aim: None,
+        rate: 0.0,
         hints: Vec::new(),
         typed: String::new(),
         charge: None,
@@ -701,11 +710,18 @@ pub fn run(
             // pointer was still being pushed.
             app.repeat_held();
             if let Some(to) = app.aim.take() {
+                let rate = match app.rate > 0.0 {
+                    true => app.rate,
+                    false => config::get().pointer.spring(),
+                };
                 match (drift.as_mut(), pointer_at) {
                     // Already moving: aim it somewhere else and let it keep
                     // the speed it has, so a run of steps is one movement.
-                    (Some(d), _) => d.to = to,
-                    (None, Some(from)) => drift = Some(Drift::new(from, to)),
+                    (Some(d), _) => {
+                        d.to = to;
+                        d.rate = rate;
+                    }
+                    (None, Some(from)) => drift = Some(Drift::new(from, to, rate)),
                     // Nowhere to travel from, so just be there.
                     (None, None) => {
                         pointer_at = Some(to);
@@ -1271,6 +1287,7 @@ impl App {
     /// life of its own.
     fn hop(&mut self, way: (f64, f64), held: bool) -> bool {
         self.stepping = Some(Instant::now());
+        self.rate = config::get().pointer.spring();
         let here = self.picked.map(|(p, _)| p);
         let from = match self.picked {
             Some((_, at)) => at,
@@ -1341,6 +1358,13 @@ impl App {
                 if !self.hop(Self::WAYS[i], true) {
                     self.held[i] = None;
                 }
+                // And keep the pointer up with the key. A step that takes
+                // longer than the wait between steps leaves the pointer
+                // further behind with every one, and letting go then looks
+                // like the focus carrying on by itself while it catches up.
+                let next = self.steps[i];
+                let wait = config::get().pointer.again(next).as_secs_f64();
+                self.rate = self.rate.max(4.6 / (wait * 1.15).max(0.02));
             }
         }
     }
@@ -1361,6 +1385,9 @@ impl App {
             return;
         };
         if Some(what) != self.lit {
+            if std::env::var_os("WL_KEYS").is_some() {
+                eprintln!("    lit -> {what:?} at ({:.0},{:.0})", at.0, at.1);
+            }
             self.lit = Some(what);
             self.dirty = true;
         }
@@ -2690,7 +2717,12 @@ wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerV1);
 
 #[cfg(test)]
 mod tests {
-    use super::{pull, Drift, Rect};
+    use super::{config, pull, Drift, Rect};
+
+    /// The pull a step is given when nothing is hurrying it along.
+    fn rate() -> f64 {
+        config::get().pointer.spring()
+    }
 
     const RIGHTWARD: (f64, f64) = (1.0, 0.0);
     const DOWNWARD: (f64, f64) = (0.0, 1.0);
@@ -2707,7 +2739,7 @@ mod tests {
     /// has covered all but a twentieth of the way, how long until it settles,
     /// and how far past the target it went.
     fn travel(from: (f64, f64), to: (f64, f64)) -> (u32, u32, f64) {
-        let mut d = Drift::new(from, to);
+        let mut d = Drift::new(from, to, rate());
         let span = to.0 - from.0;
         let (mut ticks, mut mostly, mut furthest) = (0u32, 0u32, 0.0f64);
         for _ in 0..400 {
@@ -2796,7 +2828,7 @@ mod tests {
 
     #[test]
     fn a_step_stops_at_the_edge_of_the_screen() {
-        let mut d = Drift::new((0.0, 0.0), (9000.0, 0.0));
+        let mut d = Drift::new((0.0, 0.0), (9000.0, 0.0), rate());
         for _ in 0..200 {
             d.advance(0.008, (300.0, 300.0));
         }
