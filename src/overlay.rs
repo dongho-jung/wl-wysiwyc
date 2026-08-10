@@ -1219,7 +1219,22 @@ fn place_labels(
                 break;
             }
         }
-        taken.push(best.map(|(_, b)| b).unwrap_or_else(|| fit(spots[0])));
+        // Nothing clear anywhere: take whichever spot hides the least of the
+        // labels already down. The first spot was the old answer, and it can
+        // land squarely on a neighbour, which reads as a target with no hint
+        // at all rather than as two labels sharing a corner.
+        let fallback = || {
+            spots
+                .iter()
+                .map(|&s| fit(s))
+                .min_by_key(|b| {
+                    let over: i64 = taken.iter().map(|t| b.covers((t.x, t.y, t.w, t.h))).sum();
+                    let hidden: i64 = elements.iter().map(|&e| b.covers(e)).sum();
+                    (over, hidden)
+                })
+                .unwrap_or_else(|| fit(spots[0]))
+        };
+        taken.push(best.map(|(_, b)| b).unwrap_or_else(fallback));
     }
     taken
 }
