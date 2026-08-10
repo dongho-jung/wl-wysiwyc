@@ -126,6 +126,16 @@ impl Drill {
                 "esc" | "escape" => Key::Escape,
                 "tab" => Key::Tab,
                 "space" => Key::Char(' '),
+                "scrollup" => Key::Scroll(Wheel {
+                    back: true,
+                    far: false,
+                    across: false,
+                }),
+                "scrolldown" => Key::Scroll(Wheel {
+                    back: false,
+                    far: false,
+                    across: false,
+                }),
                 "click" => Key::LeftClick,
                 one if one.chars().count() == 1 => Key::Char(one.chars().next().unwrap()),
                 other => return Err(format!("{other}: not a key")),
@@ -1224,11 +1234,7 @@ impl App {
         self.typed.clear();
         self.armed = None;
         self.charge = None;
-        // A press is worth the next target that way, whatever the distance.
-        // Holding takes over from there, but a tap has to land somewhere: a
-        // push of its own would be a nudge in an open stretch and three
-        // targets in a crowded one.
-        self.hop(Self::WAYS[which]);
+        self.hop(Self::WAYS[which], false);
     }
 
     /// The four directions, in the order the keys are held in.
@@ -1242,14 +1248,21 @@ impl App {
     }
 
     /// Send the pointer to the next target that way.
-    fn hop(&mut self, way: (f64, f64)) {
+    ///
+    /// A press will cross a gap and, going up or down, carry on in reading
+    /// order when nothing is in line. A key held down will not do either: it
+    /// keeps to the run it is walking and stops at the end of it. Otherwise
+    /// holding down a list runs off the end of it, leaps to whatever section
+    /// is next, and keeps going there, which is a key that has taken on a
+    /// life of its own.
+    fn hop(&mut self, way: (f64, f64), held: bool) -> bool {
         self.stepping = Some(Instant::now());
         let here = self.picked.map(|(p, _)| p);
         let from = match self.picked {
             Some((_, at)) => at,
             None => match hypr::cursor_pos() {
                 Some(at) => at,
-                None => return,
+                None => return false,
             },
         };
         let all = self.boxed();
@@ -1264,9 +1277,23 @@ impl App {
             .filter(|&(what, _, _)| here != Some(what))
             .collect();
         let boxes: Vec<Rect> = targets.iter().map(|&(_, _, r)| r).collect();
-        if let Some(i) = pull(mine, way, &boxes, config::get().pointer.reach_px) {
-            let (what, at, _) = targets[i];
-            self.focus(what, at);
+        let reach = config::get().pointer.reach_px;
+        let reach = if held { reach / 3.0 } else { reach };
+        match pull(mine, way, &boxes, reach, !held) {
+            Some(i) => {
+                let (what, at, _) = targets[i];
+                if std::env::var_os("WL_KEYS").is_some() {
+                    eprintln!("  hop {:?} -> ({:.0},{:.0})", way, at.0, at.1);
+                }
+                self.focus(what, at);
+                true
+            }
+            None => {
+                if std::env::var_os("WL_KEYS").is_some() {
+                    eprintln!("  hop {way:?} -> nothing");
+                }
+                false
+            }
         }
     }
 
@@ -1295,7 +1322,11 @@ impl App {
             if since.elapsed() >= due {
                 self.steps[i] += 1;
                 self.held[i] = Some(Instant::now());
-                self.hop(Self::WAYS[i]);
+                // The end of the run the key was walking: stop there rather
+                // than set off across the window.
+                if !self.hop(Self::WAYS[i], true) {
+                    self.held[i] = None;
+                }
             }
         }
     }
@@ -1581,7 +1612,13 @@ impl App {
 /// window: answering a press meaning "the next one down" with a jump across
 /// the screen is worse than answering it with nothing, and holding the key
 /// flies there under your own hand anyway.
-fn pull(from: Rect, (dx, dy): (f64, f64), boxes: &[Rect], reach: f64) -> Option<usize> {
+fn pull(
+    from: Rect,
+    (dx, dy): (f64, f64),
+    boxes: &[Rect],
+    reach: f64,
+    wander: bool,
+) -> Option<usize> {
     /// What a pixel to the side costs, against a pixel of the way there.
     const ACROSS: f64 = 2.0;
     /// How far to the side is still that way at all: a fixed allowance for
@@ -1624,7 +1661,7 @@ fn pull(from: Rect, (dx, dy): (f64, f64), boxes: &[Rect], reach: f64) -> Option<
         })
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, i)| i);
-    if best.is_some() || dx != 0.0 {
+    if best.is_some() || dx != 0.0 || !wander {
         return best;
     }
 
@@ -2414,8 +2451,18 @@ impl Dispatch<HyprlandGlobalShortcutV1, Key> for App {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            hyprland_global_shortcut_v1::Event::Pressed { .. } => state.press(*key),
-            hyprland_global_shortcut_v1::Event::Released { .. } => state.release(*key),
+            hyprland_global_shortcut_v1::Event::Pressed { .. } => {
+                if std::env::var_os("WL_KEYS").is_some() {
+                    eprintln!("KEY down {}", key.name());
+                }
+                state.press(*key)
+            }
+            hyprland_global_shortcut_v1::Event::Released { .. } => {
+                if std::env::var_os("WL_KEYS").is_some() {
+                    eprintln!("KEY up   {}", key.name());
+                }
+                state.release(*key)
+            }
         }
     }
 }
@@ -2647,7 +2694,7 @@ mod tests {
             .collect();
         for i in 0..5 {
             let rest: Vec<Rect> = rows[i + 1..].to_vec();
-            let next = pull(rows[i], DOWNWARD, &rest, REACH);
+            let next = pull(rows[i], DOWNWARD, &rest, REACH, true);
             assert_eq!(next, Some(0), "row {i} did not step to the one below");
         }
     }
@@ -2658,7 +2705,7 @@ mod tests {
         // and plainly to the right.
         let left = at(215.0, 476.0, 145.0, 16.0);
         let right = [at(645.0, 476.0, 119.0, 16.0), at(645.0, 800.0, 119.0, 16.0)];
-        assert_eq!(pull(left, RIGHTWARD, &right, REACH), Some(0));
+        assert_eq!(pull(left, RIGHTWARD, &right, REACH, true), Some(0));
     }
 
     #[test]
@@ -2666,11 +2713,11 @@ mod tests {
         let from = at(600.0, 500.0, 80.0, 16.0);
         // Up and to the right, at sixty degrees: not what right means.
         let corner = [at(700.0, 300.0, 80.0, 16.0)];
-        assert_eq!(pull(from, RIGHTWARD, &corner, REACH), None);
+        assert_eq!(pull(from, RIGHTWARD, &corner, REACH, true), None);
         // And nothing at all beyond arm's length.
         let far = [at(1400.0, 500.0, 80.0, 16.0)];
-        assert_eq!(pull(from, RIGHTWARD, &far, 500.0), None);
-        assert_eq!(pull(from, RIGHTWARD, &far, 900.0), Some(0));
+        assert_eq!(pull(from, RIGHTWARD, &far, 500.0, true), None);
+        assert_eq!(pull(from, RIGHTWARD, &far, 900.0, true), Some(0));
     }
 
     #[test]
@@ -2681,8 +2728,8 @@ mod tests {
             at(80.0, 0.0, 40.0, 20.0),
             at(80.0, 44.0, 40.0, 20.0),
         ];
-        assert_eq!(pull(from, RIGHTWARD, &boxes, REACH), Some(1));
-        assert_eq!(pull(from, DOWNWARD, &boxes, REACH), Some(2));
+        assert_eq!(pull(from, RIGHTWARD, &boxes, REACH, true), Some(1));
+        assert_eq!(pull(from, DOWNWARD, &boxes, REACH, true), Some(2));
     }
 
     #[test]

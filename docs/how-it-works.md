@@ -203,6 +203,14 @@ shorter than the last down to `pointer.repeat_min_ms`. Holding is for
 covering ground, and covering it a target at a time keeps every landing
 on something.
 
+A held key keeps to the run it is walking. It reaches a third as far as
+a press does and will not carry on in reading order, so it walks a list
+to the end of the list and stops. A press will do both of those things,
+which is how you leave the list. Without that, holding down a column of
+twenty certificate names runs off the end, leaps to whatever section
+comes next, and carries on there: a key that has taken on a life of its
+own, and the thing that made holding one feel broken.
+
 It was a push once, with the pointer let off its leash while the key
 was down and caught by whatever it ended up near. That reads as the key
 still being held after it has been let go: the pointer carries on for a
@@ -459,8 +467,11 @@ extent, then a left button press and release.
   right at the window edge      0px SAME 0px SAME
   ```
 
-  `WL_TRACE=1` adds a line per frame of the pointer's own motion, which
-  is how the timing of the flight itself gets looked at.
+  `WL_TRACE=1` adds a line per frame of the pointer's own motion, and
+  `WL_KEYS=1` a line per key the compositor delivers and per step taken.
+  Between them they answer where a movement came from, which is how a
+  hold that would not stop was pinned on the steps rather than on the
+  keys: the release arrives when it should.
 - `--move-test X Y` moves the cursor to global (X, Y) through the
   virtual pointer without clicking. Verifies coordinate mapping.
 
