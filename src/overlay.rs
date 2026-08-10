@@ -149,6 +149,8 @@ enum Target {
 #[derive(Clone)]
 struct Hint {
     label: String,
+    /// Whether this one travels when the window is scrolled.
+    scrolls: bool,
     /// Element rectangle and click center, global logical coordinates.
     rx: f64,
     ry: f64,
@@ -191,8 +193,8 @@ struct App {
     /// window again once the scrolling stops.
     scroll: Option<Wheel>,
     settle: Option<Instant>,
-    /// Says when the window moved under the overlay, wheel or otherwise.
-    watch: Option<std::sync::mpsc::Receiver<()>>,
+    /// Says how far the window moved under the overlay, wheel or otherwise.
+    watch: Option<std::sync::mpsc::Receiver<(f64, f64)>>,
     /// With `keys.confirm` on, a key pressed once and not taken yet: it shows
     /// what it would select, and pressing it again takes it.
     armed: Option<char>,
@@ -437,8 +439,8 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
             }
             // Someone scrolled the window without going through the overlay,
             // which the hints have no way of knowing on their own.
-            if app.watch.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
-                app.shifted();
+            while let Some(moved) = app.watch.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                app.shifted(moved);
             }
             // Everything has moved, so the hints have to be read again. Once
             // the scrolling stops, not on every press of a key held down.
@@ -641,20 +643,38 @@ impl App {
             return;
         }
         self.scroll = Some(wheel);
-        self.shifted();
+        self.shifted((0.0, 0.0));
     }
 
     /// The window moved under the overlay: the labels name where things were.
     /// Drop them and read again once it stops moving.
-    fn shifted(&mut self) {
+    fn shifted(&mut self, (dx, dy): (f64, f64)) {
         if matches!(self.stage, Stage::PickWindow) {
             return;
         }
-        self.dirty |= self.settle.is_none();
         self.settle = Some(Instant::now() + config::get().scroll.settle());
         self.typed.clear();
         self.armed = None;
         self.charge = None;
+        self.dirty = true;
+        // Carry the labels along rather than leave them behind. Whatever the
+        // document moved by, everything in it moved by, so the labels can
+        // follow within a frame of the content instead of waiting out the
+        // read that will place them exactly.
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        for h in self.hints.iter_mut().filter(|h| h.scrolls) {
+            h.rx += dx;
+            h.ry += dy;
+            h.cx += dx;
+            h.cy += dy;
+        }
+        if let Some((Target::Hint(i), at)) = self.picked {
+            if self.hints.get(i).is_some_and(|h| h.scrolls) {
+                self.picked = Some((Target::Hint(i), (at.0 + dx, at.1 + dy)));
+            }
+        }
     }
 
     /// Read the window again, now that the scrolling has stopped.
@@ -1061,13 +1081,14 @@ impl App {
 
     fn enter_hint_stage(&mut self, win: usize) {
         let els = self.elements_cache.get(&win).cloned().unwrap_or_default();
-        // Watch whatever sits nearest the middle of the window. The chrome
-        // around a page does not move when the page scrolls, and the middle
-        // is the part least likely to be chrome.
+        // Watch something inside the document, since that is the part that
+        // moves, and the one nearest the middle of the window, since that is
+        // the part least likely to be pinned to an edge.
         let w = &self.snap.windows[win];
         let (mx, my) = (w.w as f64 / 2.0, w.h as f64 / 2.0);
         self.watch = els
             .iter()
+            .filter(|e| e.scrolls)
             .min_by(|a, b| {
                 let d = |e: &Element| (e.x - mx).powi(2) + (e.y - my).powi(2);
                 d(a).total_cmp(&d(b))
@@ -1173,6 +1194,7 @@ fn hints_for(w: &crate::hypr::Window, els: &[Element]) -> Vec<Hint> {
         ))
         .map(|((e, &(cx, cy)), label)| Hint {
             label,
+            scrolls: e.scrolls,
             rx: w.x as f64 + e.x,
             ry: w.y as f64 + e.y,
             rw: e.w,
@@ -1553,7 +1575,7 @@ fn draw_pick_hint(
         stale,
     } = view;
     // How much of itself a label is showing. Stale ones step back.
-    let lit = |c: Color| if stale { c.fade(0.3) } else { c };
+    let lit = |c: Color| if stale { c.fade(0.55) } else { c };
     // What the armed key would leave behind, which is what it previews.
     let preview = armed.map(|ch| format!("{typed}{ch}"));
     // One candidate left means the next press takes it, so it is worth more
@@ -1670,43 +1692,48 @@ fn draw_charge(canvas: &mut Canvas, el: Rect, (level, frac): (u32, f32), font: &
     let top = cfg.click.levels();
 
     // What is stored: the target sits inside a ring that grows with it.
-    canvas.round_rect_shadow(el, radius, (7.0 + 4.0 * level as f32) * s, here.fade(0.34));
-    canvas.round_rect_outline(el, radius, (1.2 + 0.9 * level as f32) * s, here);
-    // Nothing more is coming, and the target says so by wearing a second ring.
+    canvas.round_rect_shadow(el, radius, (9.0 + 6.0 * level as f32) * s, here.fade(0.42));
+    canvas.round_rect_outline(el, radius, (1.6 + 1.1 * level as f32) * s, here);
+    // Nothing more is coming, and the target says so by wearing two more.
     if level >= top {
-        let pad = 5.0 * s;
-        canvas.round_rect_outline(el.grow(pad), radius + pad, 1.4 * s, here.fade(0.55));
+        for (pad, alpha) in [(5.0, 0.7), (10.0, 0.3)] {
+            let pad = pad * s;
+            canvas.round_rect_outline(el.grow(pad), radius + pad, 1.6 * s, here.fade(alpha));
+        }
     }
 
     // What is coming: a ring closing in, quicker the nearer it gets, so the
     // moment it lands is the moment the count goes up.
     if level < top {
         let ease = frac * frac;
-        let pad = (17.0 - 14.0 * ease) * s;
+        let pad = (22.0 - 18.0 * ease) * s;
         canvas.round_rect_outline(
             el.grow(pad),
             radius + pad,
-            (1.0 + 1.8 * ease) * s,
-            tone(level + 1).fade(0.10 + 0.75 * ease),
+            (1.2 + 2.6 * ease) * s,
+            tone(level + 1).fade(0.12 + 0.85 * ease),
         );
     }
 
     // And the wave off the one that just landed, which is what makes a step
     // something you feel rather than something you notice afterwards.
-    if level > 1 && frac < 0.35 {
-        let k = frac / 0.35;
-        let pad = (2.0 + 30.0 * k) * s;
-        canvas.round_rect_outline(
-            el.grow(pad),
-            radius + pad,
-            (2.5 - 1.6 * k) * s,
-            here.fade((1.0 - k) * (1.0 - k) * 0.8),
-        );
+    if level > 1 && frac < 0.4 {
+        let k = frac / 0.4;
+        for (lag, weight) in [(0.0, 1.0), (0.25, 0.45)] {
+            let k = ((k - lag) / (1.0 - lag)).clamp(0.0, 1.0);
+            let pad = (3.0 + 46.0 * k) * s;
+            canvas.round_rect_outline(
+                el.grow(pad),
+                radius + pad,
+                (3.4 - 2.2 * k) * s,
+                here.fade((1.0 - k) * (1.0 - k) * 0.9 * weight),
+            );
+        }
     }
 
     // The count, in as many words. A badge over the target, or under it when
     // the target sits against the top of the screen.
-    let px = cfg.label.size * 1.3 * s;
+    let px = cfg.label.size * (1.25 + 0.12 * level as f32) * s;
     let text = format!("x{level}");
     let (pad_x, pad_y) = (cfg.label.pad_x * s, cfg.label.pad_y * s);
     let bw = draw::text_width(font, &text, px) + 2.0 * pad_x;

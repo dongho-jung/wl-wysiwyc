@@ -60,8 +60,8 @@ click:
   # how many times: a tap clicks once, holding past double_ms clicks
   # twice, past triple_ms three times. Zero on either turns that step
   # off, so double_ms: 0 leaves every click single.
-  double_ms: 350
-  triple_ms: 800
+  double_ms: 450
+  triple_ms: 1100
 
   # Show the charge while the key is down: a ring closing in on the
   # target as the step fills, a wave as it lands, and a badge saying

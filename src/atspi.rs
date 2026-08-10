@@ -50,8 +50,10 @@ const MAX_NODES: usize = 4000;
 const BATCH: usize = 32;
 
 /// A node waiting to be walked: where it lives, the pixel ratio inherited
-/// from its document, and the parent that ratio was measured against.
-type Pending = (String, String, f64, Option<String>);
+/// from its document, the parent that ratio was measured against, and
+/// whether it is inside a document, which is the part of a window that
+/// scrolls.
+type Pending = (String, String, f64, Option<String>, bool);
 
 /// A clickable element, window-relative logical coordinates. The node it came
 /// from is kept so its box can be looked at again later, which is how a
@@ -65,6 +67,12 @@ pub struct Element {
     pub h: f64,
     pub dest: String,
     pub path: String,
+    /// Inside a document, so it moves when the window is scrolled. The
+    /// chrome around one does not.
+    pub scrolls: bool,
+    /// The pixel ratio its extents were reported in, so the same node can be
+    /// measured again later and compared.
+    pub ratio: f64,
 }
 
 pub fn role_name(role: u32) -> &'static str {
@@ -249,26 +257,35 @@ fn bus() -> Result<Connection, Box<dyn Error>> {
     Ok(zbus::blocking::connection::Builder::address(addr.as_str())?.build()?)
 }
 
-/// Watch one node's box and say so when it moves.
+/// Watch one node's box and report how far it moves.
 ///
 /// A window that scrolls under the overlay leaves every hint naming where
 /// something used to be, and nothing tells the overlay that happened: it
 /// takes no pointer input, so the wheel that did it went straight past.
-/// Asking one node where it is, a few times a second, is one round trip and
-/// catches it. The receiver going away is what stops the thread.
-pub fn watch_bounds(el: &Element) -> Option<Receiver<()>> {
+/// Asking one node where it is, twenty times a second, is one round trip and
+/// catches it, and the answer is also how far everything inside the document
+/// moved, which is what the labels need to follow along. The receiver going
+/// away is what stops the thread.
+pub fn watch_bounds(el: &Element) -> Option<Receiver<(f64, f64)>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let conn = bus().ok()?;
-    let (dest, path) = (el.dest.clone(), el.path.clone());
+    let (dest, path, ratio) = (el.dest.clone(), el.path.clone(), el.ratio);
     let mut last = extents_of(&conn, &dest, &path);
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_millis(45));
         let now = extents_of(&conn, &dest, &path);
-        if now != last {
-            last = now;
-            if tx.send(()).is_err() {
-                return;
-            }
+        if now == last {
+            continue;
+        }
+        let moved = match (last, now) {
+            (Some(a), Some(b)) => ((b.0 - a.0) as f64 / ratio, (b.1 - a.1) as f64 / ratio),
+            // The node came or went, so nothing sensible to move by; the
+            // read that follows sorts it out.
+            _ => (0.0, 0.0),
+        };
+        last = now;
+        if tx.send(moved).is_err() {
+            return;
         }
     });
     Some(rx)
@@ -332,7 +349,7 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
     // Nodes to walk: the ones inside the window first, everything else after.
     let mut queue: VecDeque<Pending> = VecDeque::new();
     let mut later: VecDeque<Pending> = VecDeque::new();
-    queue.push_back((frame.0.clone(), frame.1.to_string(), 1.0, None));
+    queue.push_back((frame.0.clone(), frame.1.to_string(), 1.0, None, false));
     let mut visited = 0usize;
     let mut seen_rects = HashSet::new();
     let mut out = Vec::new();
@@ -360,7 +377,7 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
         visited += batch.len();
         let read = read_batch(&conn, &batch);
 
-        for ((node_dest, path, ratio, parent_path), info) in batch.into_iter().zip(read) {
+        for ((node_dest, path, ratio, parent_path, in_doc), info) in batch.into_iter().zip(read) {
             if out.len() >= cfg.max {
                 break 'walk;
             }
@@ -407,6 +424,8 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
                                 h: eh,
                                 dest: node_dest.clone(),
                                 path: path.clone(),
+                                scrolls: in_doc,
+                                ratio,
                             });
                         }
                     }
@@ -432,7 +451,13 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
 
             let next = if promising { &mut queue } else { &mut later };
             for (cd, cp) in info.kids {
-                next.push_back((cd, cp.to_string(), child_ratio, Some(path.clone())));
+                next.push_back((
+                    cd,
+                    cp.to_string(),
+                    child_ratio,
+                    Some(path.clone()),
+                    in_doc || role == ROLE_DOCUMENT_WEB,
+                ));
             }
         }
 
@@ -468,6 +493,8 @@ mod tests {
             h,
             dest: String::new(),
             path: String::new(),
+            scrolls: false,
+            ratio: 1.0,
         }
     }
 

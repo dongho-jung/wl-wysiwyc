@@ -121,20 +121,34 @@ over whatever the pointer is on, without leaving the overlay: shift
 sends a long run of notches to reach the end, ctrl turns the pair
 sideways. It is the virtual pointer doing it, and the overlay takes no
 pointer input, so the wheel reaches the window underneath exactly as a
-real one would. Scrolling moves everything the hints named, so from the
-first press they are drawn faded and answer to nothing, and the window
-is read again once the scrolling settles. Fading rather than clearing
-them is deliberate: labels that go out and come back are two flinches
-where a fade is none, and the fade says by itself that they are not to
-be typed yet.
+real one would. Scrolling moves everything the hints named, so they
+travel with it: whatever the document moved by, everything inside it
+moved by, and the labels are carried the same distance within a frame
+of the content rather than left behind. They are drawn faded and answer
+to nothing while this is going on, since following is not the same as
+being right, and the window is read again once the scrolling settles.
+Fading rather than clearing them is deliberate: labels that go out and
+come back are two flinches where a fade is none.
+
+Only what is inside a document travels. The walk marks every element
+under a `document web` node, and the chrome around one - tabs,
+bookmarks, toolbar - is left alone, since it does not move when the
+page does.
+
+
+
+Only what is inside a document travels. The walk marks every element
+under a `document web` node, and the chrome around one - tabs,
+bookmarks, toolbar - is left alone, since it does not move when the
+page does.
 
 A wheel turned by hand does the same thing without saying so: the
-overlay takes no pointer input, so the scroll goes straight past it and
-the labels are left naming where things were. One element near the
-middle of the window is asked where it is eight times a second, which
-is a single message, and the labels fade and come back the same way as
-for a scroll key. The middle is where the answer means something: the
-chrome around a page does not move when the page does.
+overlay takes no pointer input, so the scroll goes straight past it.
+One element inside the document is asked where it is twenty times a
+second, which is a single message, and its answer is also how far to
+carry the labels, so a wheel turned by hand reads the same as a scroll
+key. It has to be an element that scrolls for the answer to mean
+anything, which is why the chrome is no use as the one to watch.
 
 Shift, ctrl and alt with a click key reach the window as themselves.
 The overlay never takes the keyboard, so the window under it already

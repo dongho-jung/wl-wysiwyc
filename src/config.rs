@@ -68,8 +68,8 @@ pub struct Click {
 impl Default for Click {
     fn default() -> Self {
         Click {
-            double_ms: 350,
-            triple_ms: 800,
+            double_ms: 450,
+            triple_ms: 1100,
             charge: true,
         }
     }
@@ -582,18 +582,18 @@ mod tests {
         let c = Click::default();
         let ms = std::time::Duration::from_millis;
         assert_eq!(c.clicks(ms(0)), 1);
-        assert_eq!(c.clicks(ms(349)), 1);
-        assert_eq!(c.clicks(ms(350)), 2);
-        assert_eq!(c.clicks(ms(799)), 2);
-        assert_eq!(c.clicks(ms(800)), 3);
+        assert_eq!(c.clicks(ms(449)), 1);
+        assert_eq!(c.clicks(ms(450)), 2);
+        assert_eq!(c.clicks(ms(1099)), 2);
+        assert_eq!(c.clicks(ms(1100)), 3);
         assert_eq!(c.clicks(ms(5000)), 3);
-        assert_eq!(c.span(), ms(800));
+        assert_eq!(c.span(), ms(1100));
         // Each step fills on its own, and the last one sits full.
         assert_eq!(c.stage(ms(0)), (1, 0.0));
-        assert_eq!(c.stage(ms(175)), (1, 0.5));
-        assert_eq!(c.stage(ms(350)), (2, 0.0));
-        assert_eq!(c.stage(ms(575)), (2, 0.5));
-        assert_eq!(c.stage(ms(800)), (3, 1.0));
+        assert_eq!(c.stage(ms(225)), (1, 0.5));
+        assert_eq!(c.stage(ms(450)), (2, 0.0));
+        assert_eq!(c.stage(ms(775)), (2, 0.5));
+        assert_eq!(c.stage(ms(1100)), (3, 1.0));
         assert_eq!(c.stage(ms(9000)), (3, 1.0));
 
         // Either step off means a hold never reaches it.
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(Click::default().levels(), 3);
         let no_triple: Click = serde_yaml::from_str("triple_ms: 0").unwrap();
         assert_eq!(no_triple.clicks(ms(9000)), 2);
-        assert_eq!(no_triple.span(), ms(350));
+        assert_eq!(no_triple.span(), ms(450));
         assert_eq!(no_triple.stage(ms(9000)), (2, 1.0));
     }
 
