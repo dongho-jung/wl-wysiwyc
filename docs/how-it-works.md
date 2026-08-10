@@ -187,11 +187,26 @@ fast it can go.
 
 Whatever it is over is what is picked, moment to moment, so the choice
 follows the pointer rather than being decided when the key went down.
-As it slows, anything within `pointer.snap_px` catches it and reels it
+As it slows, something within `pointer.snap_px` catches it and reels it
 the rest of the way in, on a spring damped just under the point where
 it would stop dead. That is what makes it land on a target rather than
-between two, and what makes a light tap worth exactly one target rather
-than none or three.
+between two.
+
+Only something it is heading towards can catch it, until it has all but
+stopped. The target it has just left is still well within reach for the
+first stretch of a light push, and would otherwise take it straight
+back, which looks like the push having done nothing. And if it comes to
+rest having been caught by nothing, whatever is nearest gets it from
+four times as far: resting between two labels leaves the pointer
+nowhere, and being somewhere is the point of it.
+
+Two things stop a flight that will not stop itself. It cannot pass the
+edge of the screen: running off one leaves the pointer parked against
+it while the number behind it runs away, and flying back then does
+nothing until all of that has been undone. And a key held for longer
+than it takes to cross a screen, or any other key being pressed, ends
+the push: both mean a release that never arrived, and the pointer
+should stop rather than sail on.
 
 Typing a hint is the other way in: that names a target outright, and
 the pointer is pulled straight there at `pointer.travel_ms` without

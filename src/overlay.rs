@@ -55,6 +55,10 @@ const CAUGHT: f64 = 22.0;
 /// hold, in pixels a second. Faster than this and it flies on by.
 const CATCH: f64 = 300.0;
 
+/// Slow enough to count as stopping rather than travelling, so that what is
+/// behind the pointer can have it as well as what is in front.
+const CRAWL: f64 = 45.0;
+
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 
@@ -140,19 +144,19 @@ impl Drift {
 
     /// Carry the pointer forward by however long it has been since the last
     /// time, and say whether it has come to rest.
-    fn step(&mut self, thrust: (f64, f64)) -> bool {
+    fn step(&mut self, thrust: (f64, f64), wall: (f64, f64)) -> bool {
         let now = Instant::now();
         // A step longer than this is the loop having been held up elsewhere.
         // Integrating it in one go would fling the pointer across the screen,
         // so it is taken as a short step instead.
         let dt = (now - self.stepped).as_secs_f64().min(0.03);
         self.stepped = now;
-        self.advance(dt, thrust)
+        self.advance(dt, thrust, wall)
     }
 
     /// The step itself, given how long it is. Apart from the clock this is
     /// all there is to the motion, so it is where the numbers can be checked.
-    fn advance(&mut self, dt: f64, thrust: (f64, f64)) -> bool {
+    fn advance(&mut self, dt: f64, thrust: (f64, f64), wall: (f64, f64)) -> bool {
         let cfg = &config::get().pointer;
         let done = match self.to {
             // Something has hold of it: a spring, damped just under the point
@@ -175,6 +179,18 @@ impl Drift {
         };
         self.at.0 += self.vel.0 * dt;
         self.at.1 += self.vel.1 * dt;
+        // Screens have edges. Letting the flight carry on past one leaves the
+        // pointer parked against it while the number behind it runs away, and
+        // then flying back does nothing until all of that has been undone.
+        for (at, vel, edge) in [
+            (&mut self.at.0, &mut self.vel.0, wall.0),
+            (&mut self.at.1, &mut self.vel.1, wall.1),
+        ] {
+            if *at < 0.0 || *at > edge {
+                *at = at.clamp(0.0, edge);
+                *vel = 0.0;
+            }
+        }
         done
     }
 }
@@ -569,18 +585,31 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
                 // nothing about hands.
                 looked = Instant::now();
                 resting = None;
-                let done = d.step(thrust);
-                // Slowing down with nothing holding it: whatever it is over
-                // catches it, and the spring reels it the rest of the way in.
+                let extent = app.snap.layout_extent;
+                let wall = ((extent.0 - 1) as f64, (extent.1 - 1) as f64);
+                let mut done = d.step(thrust, wall);
+                // Slowing down with nothing holding it: something near enough
+                // catches it and the spring reels it the rest of the way in.
+                //
+                // Only something it is heading towards, until it has all but
+                // stopped. Otherwise the target it has just left, still well
+                // within reach, takes it straight back and a light push does
+                // nothing at all.
                 if d.to.is_none() && thrust == (0.0, 0.0) && d.speed() < CATCH {
-                    let snap = config::get().pointer.snap_px;
+                    let cfg = &config::get().pointer;
+                    // Nothing caught it on the way, so whatever is nearest
+                    // gets it: coming to rest between two labels leaves the
+                    // pointer nowhere, and the point of it is to be somewhere.
+                    let reach = if done { cfg.snap_px * 4.0 } else { cfg.snap_px };
                     if let Some((_, at, away)) = app.nearest(d.at) {
-                        if away < snap {
+                        let ahead = (at.0 - d.at.0) * d.vel.0 + (at.1 - d.at.1) * d.vel.1;
+                        if away < reach && (ahead >= 0.0 || d.speed() < CRAWL || done) {
                             d.to = Some(at);
+                            // Being reeled in is not being at rest.
+                            done = false;
                         }
                     }
                 }
-                let extent = app.snap.layout_extent;
                 let caught =
                     d.to.is_some_and(|to| (to.0 - d.at.0).hypot(to.1 - d.at.1) < CAUGHT);
                 move_and_click(vp, d.at, extent, None, &mut queue, &mut app)?;
@@ -1047,10 +1076,14 @@ impl App {
     /// that way for as long as it is held, so a tap nudges it to the next
     /// thing along and a hold carries it across the window.
     fn hold_arrow(&mut self, which: usize, down: bool) {
-        if self.held[which].is_some() == down {
+        let already = self.held[which].is_some();
+        // Always restamp on the way down. A press that finds the key already
+        // held is a release that went missing, and leaving the old stamp
+        // there would leave that direction dead.
+        self.held[which] = down.then(Instant::now);
+        if already == down {
             return;
         }
-        self.held[which] = down.then(Instant::now);
         if down {
             self.fresh = false;
             self.flying = true;
@@ -1063,12 +1096,12 @@ impl App {
 
     /// Which way the keys being held are pushing, as a unit vector.
     ///
-    /// A key held for longer than any window is wide has not been let go of:
-    /// the release was lost somewhere, and the pointer should stop rather
-    /// than fly on into a corner.
+    /// A key held for longer than it takes to cross a screen has not been
+    /// let go of: the release was lost somewhere, and the pointer should
+    /// stop rather than fly on into a corner.
     fn thrust(&self) -> (f64, f64) {
         let down = |i: usize| {
-            self.held[i].is_some_and(|since| since.elapsed() < Duration::from_millis(2500))
+            self.held[i].is_some_and(|since| since.elapsed() < Duration::from_millis(1200))
         };
         let axis = |less: usize, more: usize| f64::from(down(more)) - f64::from(down(less));
         let (x, y) = (axis(0, 1), axis(2, 3));
@@ -2258,17 +2291,20 @@ mod tests {
 
     const RIGHT: (f64, f64) = (1.0, 0.0);
     const NONE: (f64, f64) = (0.0, 0.0);
+    /// Somewhere for the pointer to run out of, well past anywhere these
+    /// tests send it.
+    const WALL: (f64, f64) = (10_000.0, 10_000.0);
 
     /// Fly for a while and then let go, at a frame rate the loop can hold.
     fn fly(push_ms: u32, coast_ms: u32) -> (f64, f64) {
         let mut d = Drift::new((0.0, 0.0), None);
         let step = 0.008;
         for _ in 0..(push_ms as f64 / 1000.0 / step) as u32 {
-            d.advance(step, RIGHT);
+            d.advance(step, RIGHT, WALL);
         }
         let pushed = d.at.0;
         for _ in 0..(coast_ms as f64 / 1000.0 / step) as u32 {
-            d.advance(step, NONE);
+            d.advance(step, NONE, WALL);
         }
         (pushed, d.at.0)
     }
@@ -2285,14 +2321,28 @@ mod tests {
     }
 
     #[test]
+    fn a_flight_stops_at_the_edge_of_the_screen() {
+        let mut d = Drift::new((0.0, 0.0), None);
+        for _ in 0..200 {
+            d.advance(0.008, RIGHT, (300.0, 300.0));
+        }
+        assert_eq!(d.at.0, 300.0, "flew past the edge");
+        assert_eq!(d.vel.0, 0.0, "still carrying speed into the wall");
+        // And it comes straight back, rather than having to undo the flight
+        // it made off the side of the screen first.
+        d.advance(0.008, (-1.0, 0.0), (300.0, 300.0));
+        assert!(d.at.0 < 300.0, "did not leave the edge");
+    }
+
+    #[test]
     fn letting_go_comes_to_a_stop() {
         let mut d = Drift::new((0.0, 0.0), None);
         for _ in 0..40 {
-            d.advance(0.008, RIGHT);
+            d.advance(0.008, RIGHT, WALL);
         }
         let mut rest = None;
         for tick in 0..250 {
-            if d.advance(0.008, NONE) {
+            if d.advance(0.008, NONE, WALL) {
                 rest = Some(tick);
                 break;
             }
