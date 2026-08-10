@@ -178,8 +178,21 @@ nearest, so a click can need no typing at all, and the arrow keys move
 it from there.
 
 An arrow key means two things, and which one depends on how long it is
-held. A press is worth the next target that way: within forty degrees
-of the line, nearest first, and no further off than `pointer.reach_px`.
+held. A press is worth the next target that way, nearest first and no
+further off than `pointer.reach_px`.
+
+Which one is "that way" is decided between boxes, not between middles.
+A page's links are left aligned and as long as their text, so the
+middle of one wanders further right the longer it is: down a list of
+certificate names the middles drift a hundred and forty pixels sideways
+over twenty rows, and a rule about middles has the bottom half of that
+list in a different column from the top half, where pressing down does
+nothing at all. Two boxes that share any of the same rows are on the
+same line, however wide either of them is, and how far apart they are
+is the gap between their near edges. What is left over sideways is what
+counts against a target: a fixed allowance for near neighbours, and a
+share of the distance for far ones, so a column four hundred pixels
+over is still to the right while something at sixty degrees is not.
 A press has to land somewhere, and a push of its own would be a nudge
 in an open stretch and three targets in a crowded one, so the press
 names the target and the pointer is pulled to it.

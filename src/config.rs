@@ -339,8 +339,9 @@ pub struct Pointer {
     /// how precisely it can be flown between two of them.
     pub snap_px: f64,
     /// How far a tap of an arrow key will reach for the next target that
-    /// way. Past this it does nothing rather than throw the pointer across
-    /// the window, and holding the key flies it there instead.
+    /// way, measured between the near edges of the two. Past this it does
+    /// nothing rather than throw the pointer across the window, and holding
+    /// the key flies it there instead.
     pub reach_px: f64,
     /// About how long the pointer takes to reach a target. It is pulled
     /// there rather than placed, so this is the settling time of the pull,
@@ -357,7 +358,7 @@ impl Default for Pointer {
             accel_px: 5200.0,
             drag: 8.5,
             snap_px: 70.0,
-            reach_px: 260.0,
+            reach_px: 500.0,
             travel_ms: 200,
         }
     }

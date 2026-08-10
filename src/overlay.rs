@@ -1207,21 +1207,36 @@ impl App {
     /// Every target the current mode offers, with where clicking it would
     /// land.
     fn targets(&self) -> Vec<(Target, (f64, f64))> {
+        self.boxed().into_iter().map(|(t, at, _)| (t, at)).collect()
+    }
+
+    /// Every target with the box it stands for, which is what stepping goes
+    /// by: a list of links is a column to the eye however much their middles
+    /// wander with the length of the text.
+    fn boxed(&self) -> Vec<(Target, (f64, f64), Rect)> {
         match self.stage {
             Stage::PickHint { .. } => self
                 .hints
                 .iter()
                 .enumerate()
-                .map(|(i, h)| (Target::Hint(i), (h.cx, h.cy)))
+                .map(|(i, h)| {
+                    (
+                        Target::Hint(i),
+                        (h.cx, h.cy),
+                        Rect::new(h.rx as f32, h.ry as f32, h.rw as f32, h.rh as f32),
+                    )
+                })
                 .collect(),
             Stage::PickTile { win } => {
                 let w = &self.snap.windows[win];
                 grid::tiles(w.w as f64, w.h as f64)
                     .into_iter()
                     .map(|t| {
+                        let (x, y) = (w.x as f64 + t.x, w.y as f64 + t.y);
                         (
                             Target::Tile(t.ch),
-                            (w.x as f64 + t.x + t.w / 2.0, w.y as f64 + t.y + t.h / 2.0),
+                            (x + t.w / 2.0, y + t.h / 2.0),
+                            Rect::new(x as f32, y as f32, t.w as f32, t.h as f32),
                         )
                     })
                     .collect()
@@ -1274,14 +1289,20 @@ impl App {
                 None => return,
             },
         };
-        let targets: Vec<(Target, (f64, f64))> = self
-            .targets()
+        let all = self.boxed();
+        let mine = all
+            .iter()
+            .find(|(what, _, _)| here == Some(*what))
+            .map(|(_, _, r)| *r)
+            // Nothing picked yet, so the pointer itself is the box to go from.
+            .unwrap_or(Rect::new(from.0 as f32, from.1 as f32, 1.0, 1.0));
+        let targets: Vec<(Target, (f64, f64), Rect)> = all
             .into_iter()
-            .filter(|&(what, _)| here != Some(what))
+            .filter(|&(what, _, _)| here != Some(what))
             .collect();
-        let points: Vec<(f64, f64)> = targets.iter().map(|&(_, at)| at).collect();
-        if let Some(i) = pull(from, way, &points, config::get().pointer.reach_px) {
-            let (what, at) = targets[i];
+        let boxes: Vec<Rect> = targets.iter().map(|&(_, _, r)| r).collect();
+        if let Some(i) = pull(mine, way, &boxes, config::get().pointer.reach_px) {
+            let (what, at, _) = targets[i];
             self.focus(what, at);
         }
     }
@@ -1587,23 +1608,38 @@ impl App {
 /// window: answering a press meaning "the next one down" with a jump across
 /// the screen is worse than answering it with nothing, and holding the key
 /// flies there under your own hand anyway.
-fn pull(from: (f64, f64), (dx, dy): (f64, f64), at: &[(f64, f64)], reach: f64) -> Option<usize> {
-    /// What a pixel off the line costs, against a pixel of plain distance.
-    const ACROSS: f64 = 1.8;
-    /// How far off the line is still that way at all: forty degrees either
-    /// side. Anything wider is not what the key meant. Pressing right and
-    /// travelling mostly upwards is worse than pressing right and staying
-    /// put, even where staying put is all there is.
-    const CONE: f64 = 0.84;
-    at.iter()
+fn pull(from: Rect, (dx, dy): (f64, f64), boxes: &[Rect], reach: f64) -> Option<usize> {
+    /// What a pixel to the side costs, against a pixel of the way there.
+    const ACROSS: f64 = 2.0;
+    /// How far to the side is still that way at all: a fixed allowance for
+    /// near neighbours, and a share of the distance for far ones.
+    const SPREAD: (f64, f64) = (40.0, 0.3);
+
+    // How far apart two spans are, and nothing if they overlap: two boxes
+    // that share any of the same rows are on the same line as far as a press
+    // to the side is concerned, however wide either of them is.
+    let gap = |(a0, a1): (f64, f64), (b0, b1): (f64, f64)| (b0 - a1).max(a0 - b1).max(0.0);
+    let span = |r: &Rect, across: bool| match across {
+        // The axis the press is not along.
+        true if dx != 0.0 => (r.y as f64, (r.y + r.h) as f64),
+        true => (r.x as f64, (r.x + r.w) as f64),
+        false if dx != 0.0 => (r.x as f64, (r.x + r.w) as f64),
+        false => (r.y as f64, (r.y + r.h) as f64),
+    };
+    let ahead = |r: &Rect| {
+        let mid = |r: &Rect| ((r.x + r.w / 2.0) as f64 * dx) + ((r.y + r.h / 2.0) as f64 * dy);
+        mid(r) - mid(&from) > 2.0
+    };
+
+    boxes
+        .iter()
         .enumerate()
-        .filter_map(|(i, &(x, y))| {
-            let (ox, oy) = (x - from.0, y - from.1);
-            let along = ox * dx + oy * dy;
-            let across = (ox * dy - oy * dx).abs();
-            let away = along.hypot(across);
-            (along > 2.0 && across <= CONE * along && away <= reach)
-                .then_some((away + ACROSS * across, i))
+        .filter_map(|(i, r)| {
+            let along = gap(span(&from, false), span(r, false));
+            let across = gap(span(&from, true), span(r, true));
+            let allowed = SPREAD.0 + SPREAD.1 * along;
+            (ahead(r) && across <= allowed && along <= reach)
+                .then_some((along + ACROSS * across, i))
         })
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, i)| i)
@@ -2516,7 +2552,70 @@ wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerV1);
 
 #[cfg(test)]
 mod tests {
-    use super::Drift;
+    use super::{pull, Drift, Rect};
+
+    const RIGHTWARD: (f64, f64) = (1.0, 0.0);
+    const DOWNWARD: (f64, f64) = (0.0, 1.0);
+    const REACH: f64 = 500.0;
+
+    fn at(x: f32, y: f32, w: f32, h: f32) -> Rect {
+        Rect::new(x, y, w, h)
+    }
+
+    #[test]
+    fn a_list_of_links_is_a_column_however_long_the_links_are() {
+        // What a real page looks like: rows eighteen apart, left aligned,
+        // and so wide apart in the middle that going by middles has them in
+        // different columns and stepping down stops working altogether.
+        let rows: Vec<Rect> = (0..6)
+            .map(|i| {
+                at(
+                    645.0,
+                    476.0 + i as f32 * 18.0,
+                    120.0 + i as f32 * 60.0,
+                    16.0,
+                )
+            })
+            .collect();
+        for i in 0..5 {
+            let rest: Vec<Rect> = rows[i + 1..].to_vec();
+            let next = pull(rows[i], DOWNWARD, &rest, REACH);
+            assert_eq!(next, Some(0), "row {i} did not step to the one below");
+        }
+    }
+
+    #[test]
+    fn a_column_over_is_still_that_way() {
+        // Two columns of a page, four hundred pixels apart: far, but level
+        // and plainly to the right.
+        let left = at(215.0, 476.0, 145.0, 16.0);
+        let right = [at(645.0, 476.0, 119.0, 16.0), at(645.0, 800.0, 119.0, 16.0)];
+        assert_eq!(pull(left, RIGHTWARD, &right, REACH), Some(0));
+    }
+
+    #[test]
+    fn nothing_that_way_is_better_than_something_the_other_way() {
+        let from = at(600.0, 500.0, 80.0, 16.0);
+        // Up and to the right, at sixty degrees: not what right means.
+        let corner = [at(700.0, 300.0, 80.0, 16.0)];
+        assert_eq!(pull(from, RIGHTWARD, &corner, REACH), None);
+        // And nothing at all beyond arm's length.
+        let far = [at(1400.0, 500.0, 80.0, 16.0)];
+        assert_eq!(pull(from, RIGHTWARD, &far, 500.0), None);
+        assert_eq!(pull(from, RIGHTWARD, &far, 900.0), Some(0));
+    }
+
+    #[test]
+    fn the_nearest_one_that_way_wins() {
+        let from = at(0.0, 0.0, 40.0, 20.0);
+        let boxes = [
+            at(300.0, 0.0, 40.0, 20.0),
+            at(80.0, 0.0, 40.0, 20.0),
+            at(80.0, 44.0, 40.0, 20.0),
+        ];
+        assert_eq!(pull(from, RIGHTWARD, &boxes, REACH), Some(1));
+        assert_eq!(pull(from, DOWNWARD, &boxes, REACH), Some(2));
+    }
 
     const RIGHT: (f64, f64) = (1.0, 0.0);
     const NONE: (f64, f64) = (0.0, 0.0);
