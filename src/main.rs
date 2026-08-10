@@ -34,6 +34,8 @@ Usage:
                              KEYS is a run of presses: all but the last
                              confirmed, the last one armed, or all of them
                              with a trailing dot (debugging aid)
+  wl-wysiwyc --keys          print the keys the overlay would bind and what
+                             each one does, without showing anything
   wl-wysiwyc --reset         leave the key submap, for when a run was killed
                              before it could (Ctrl+Esc does the same)
   wl-wysiwyc --move-test X Y move the cursor to global (X, Y) through the
@@ -82,6 +84,7 @@ fn run() -> Result<(), Box<dyn Error>> {
             let path = args.get(1).ok_or("--render needs a file to write")?;
             render(path, opt_window(2)?, args.get(3).map_or("", String::as_str))
         }
+        Some("--keys") => keys(),
         Some("--reset") => {
             hypr::leave_submap()?;
             println!("left the wl-wysiwyc submap");
@@ -99,6 +102,17 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         Some(other) => Err(format!("unknown argument {other}; see --help").into()),
     }
+}
+
+/// What the submap would bind, and to what. Every key the overlay answers
+/// for, so a config that gives one key two jobs can be seen without opening
+/// the overlay to find out.
+fn keys() -> Result<(), Box<dyn Error>> {
+    for key in shortcuts::keys() {
+        let bindings = key.bindings().join(", ");
+        println!("{:<10} {bindings}", key.name());
+    }
+    Ok(())
 }
 
 fn list() -> Result<(), Box<dyn Error>> {

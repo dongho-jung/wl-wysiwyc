@@ -96,11 +96,12 @@ ignored, so a hint typed at speed is one press per character.
 
 Completing a hint or picking a grid tile does not click. It puts the
 pointer on that target and stops there, marked green with a ring, and
-then `left_click` (Enter by default) clicks it, `right_click`
-(backslash) right-clicks it, and typing another hint moves the target
-somewhere else. Moving the pointer is the point of the pause as much as
-the choice of button is: it is how the window under it shows a hover,
-and how a menu that only opens on hover can be opened at all.
+then `left_click` (`-` or Enter by default) clicks it, `right_click`
+(`=`) right-clicks it, shift with any left click key double-clicks it,
+and typing another hint moves the target somewhere else. Moving the
+pointer is the point of the pause as much as the choice of button is:
+it is how the window under it shows a hover, and how a menu that only
+opens on hover can be opened at all.
 
 Two settings change this. `keys.instant` clicks the moment a hint is
 complete, skipping the pause and the choice. `keys.confirm` asks for
@@ -118,8 +119,17 @@ pointer travels to a new target over about a tenth of a second rather
 than jumping, since a pointer that jumps leaves you hunting for it.
 
 Esc unwinds one step at a time: the armed key, then the target, then
-what was typed, then the overlay. Backspace undoes one key press. Space
-swaps element hints for the letter grid. Tab opens the window picker.
+what was typed, then the overlay. Backspace undoes one key press.
+`keys.switch` (space) swaps element hints for the letter grid. Tab opens
+the window picker.
+
+A key does one job. Each of them registers one shortcut with the
+compositor, and the submap binds the keys that press it: several keys on
+one click is several binds on one shortcut, not several shortcuts. When
+the config gives a key away, whatever else wanted it steps aside rather
+than both firing, so putting space on `left_click` leaves the grid with
+no switch key until another is named. `wl-wysiwyc --keys` prints what
+the submap would bind, which is the quick way to see what a config did.
 
 `keys.reset` is worth setting to whatever key opens the overlay. While
 the overlay is up its keys live in a compositor submap, and a submap
@@ -308,6 +318,9 @@ extent, then a left button press and release.
 
   This is the only way to look at an armed overlay, since the smoke
   runs do not take the keyboard, and it leaves the desktop alone.
+- `--keys` prints every shortcut the overlay registers and the keys the
+  submap presses it with, one line each. What a config did to the keys,
+  without opening the overlay to find out.
 - `--move-test X Y` moves the cursor to global (X, Y) through the
   virtual pointer without clicking. Verifies coordinate mapping.
 

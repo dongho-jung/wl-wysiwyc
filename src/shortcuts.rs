@@ -46,6 +46,8 @@ pub enum Key {
     RightClick,
     /// Start the overlay's choices over, without giving up on it.
     Reset,
+    /// Swap element hints for the letter grid, and back.
+    Switch,
     /// Move the target to the nearest one that way.
     Left,
     Right,
@@ -56,28 +58,36 @@ pub enum Key {
 }
 
 impl Key {
-    /// The keys the submap presses this shortcut with. Usually the key's own
-    /// name; a double click is the left click key with shift held, which is
-    /// why the binding and the name are not always the same string.
-    pub fn binding(self) -> String {
+    /// The keys the submap presses this shortcut with, which is usually just
+    /// the key's own name. A click can answer to several keys, and a double
+    /// click is any of the left click keys with shift held, so a shortcut is
+    /// not always one binding.
+    pub fn bindings(self) -> Vec<String> {
+        let keys = &crate::config::get().keys;
         match self {
-            Key::DoubleClick => format!("SHIFT + {}", crate::config::get().keys.left()),
-            other => other.name(),
+            Key::LeftClick => keys.left(),
+            Key::RightClick => keys.right(),
+            Key::DoubleClick => keys.left().iter().map(|k| format!("SHIFT + {k}")).collect(),
+            other => vec![other.name()],
         }
     }
 
-    /// The shortcut id, which is also the xkb key name the submap binds. The
-    /// click keys are whatever the config says they are.
+    /// The shortcut id, which for everything but the click keys is also the
+    /// xkb key name the submap binds. A click key answering to several keys
+    /// is registered once, under the first of them.
     pub fn name(self) -> String {
+        let keys = &crate::config::get().keys;
+        let first = |ks: Vec<String>| ks.into_iter().next().unwrap_or_default();
         match self {
             Key::Char(' ') => "space".into(),
             Key::Char(c) => c.to_string(),
             Key::Escape => "escape".into(),
             Key::Backspace => "backspace".into(),
             Key::Tab => "tab".into(),
-            Key::LeftClick => crate::config::get().keys.left(),
-            Key::RightClick => crate::config::get().keys.right(),
-            Key::Reset => crate::config::get().keys.reset().unwrap_or_default(),
+            Key::LeftClick => first(keys.left()),
+            Key::RightClick => first(keys.right()),
+            Key::Reset => keys.reset().unwrap_or_default(),
+            Key::Switch => keys.switch().unwrap_or_default(),
             Key::Left => "left".into(),
             Key::Right => "right".into(),
             Key::Up => "up".into(),
@@ -88,38 +98,44 @@ impl Key {
 }
 
 /// Every key the overlay listens for: hint letters, window numbers, the mode
-/// toggle, the ones that back out, and the ones that click. A letter the
-/// config gave to a click key is registered once, as that click key, so the
-/// compositor is never asked to bind the same name twice. An excluded letter
-/// is still bound, and still does nothing: a key the submap has no bind for
-/// falls through to the window underneath, which would type into it.
+/// toggle, the ones that back out, and the ones that click. A key the config
+/// gave a job to is registered once, for that job, so the compositor is never
+/// asked to bind the same name twice. An excluded letter is still bound, and
+/// still does nothing: a key the submap has no bind for falls through to the
+/// window underneath, which would type into it.
 pub fn keys() -> Vec<Key> {
-    let taken = crate::config::get().keys.taken_letters();
-    let mut out: Vec<Key> = ('a'..='z')
-        .filter(|c| !taken.contains(c))
-        .map(Key::Char)
-        .collect();
-    out.extend(('1'..='9').map(Key::Char));
-    out.extend([
-        Key::Char(' '),
+    let cfg = &crate::config::get().keys;
+    let claimed = cfg.claimed();
+    let mut out = vec![
+        Key::LeftClick,
+        Key::RightClick,
+        Key::DoubleClick,
         Key::Escape,
         Key::Backspace,
         Key::Tab,
-        Key::LeftClick,
-        Key::RightClick,
         Key::Left,
         Key::Right,
         Key::Up,
         Key::Down,
-        Key::DoubleClick,
-    ]);
-    // The key that opens the overlay is usually this one, and while the
+    ];
+    // The key that opens the overlay is usually the reset key, and while the
     // overlay is up the compositor gives it to the submap rather than to the
     // keybind that started it. Binding it here is what makes a second press
     // mean something.
-    if crate::config::get().keys.reset().is_some() {
+    if cfg.reset().is_some() {
         out.push(Key::Reset);
     }
+    if cfg.switch().is_some() {
+        out.push(Key::Switch);
+    }
+    out.extend(
+        ('a'..='z')
+            .chain('1'..='9')
+            .chain([' '])
+            .map(Key::Char)
+            .filter(|k| !claimed.contains(&k.name())),
+    );
+    out.retain(|k| !k.name().is_empty());
     out
 }
 
@@ -163,7 +179,10 @@ impl Shortcuts {
         };
         let binds: Vec<(String, String)> = keys()
             .into_iter()
-            .map(|k| (k.name(), k.binding()))
+            .flat_map(|k| {
+                let id = k.name();
+                k.bindings().into_iter().map(move |b| (id.clone(), b))
+            })
             .collect();
         if let Err(e) = hypr::enter_submap(&binds) {
             eprintln!("shortcuts: {e}");

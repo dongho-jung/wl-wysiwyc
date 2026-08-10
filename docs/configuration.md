@@ -24,12 +24,18 @@ keys:
   # before clicking and to choose which button.
   instant: false
 
-  # The keys that click. Either an xkb key name or the character itself,
-  # which is translated to the name the compositor wants. A letter here
-  # is kept out of the hints and the grid, so it never means two things.
-  # Mind that a bare - or = is YAML syntax: quote it, or use the name.
-  left_click: minus
+  # The keys that click, either one or a list of them. Either an xkb key
+  # name or the character itself, which is translated to the name the
+  # compositor wants (enter is spelled return). A letter here is kept
+  # out of hints and the grid, so it never means two things. Mind that
+  # a bare - or = is YAML syntax: quote it, or use the name.
+  left_click: [minus, return]
   right_click: equal
+
+  # Swaps element hints for the letter grid. Give this key to a click
+  # and it stops switching, since a key does one job; name another key
+  # here to keep the grid within reach. Empty means none.
+  switch: space
 
   # The keyboard the labels are laid out on, so that where something is
   # on screen decides which key names it: qwerty, dvorak, or none. With
@@ -84,9 +90,12 @@ elements:
   press and clicks the moment the hint is complete, faster and less
   forgiving. `confirm: true` goes the other way and wants every key
   twice.
-- A click key does not have to be one of the two defaults. Any key xkb
-  can name works, and if it is a letter the hints and the grid make room
-  by leaving that letter out. The same goes for `reset`.
+- A click key does not have to be one of the defaults. Any key xkb can
+  name works, and if it is a letter the hints and the grid make room by
+  leaving that letter out. The same goes for `reset` and `switch`.
+- Several keys can click. `left_click: [minus, space, enter]` clicks on
+  any of the three, and shift with any of them double-clicks. They are
+  one shortcut with three keys on it, not three shortcuts.
 - Excluding letters costs capacity, not correctness: fewer keys means
   more windows need two-key hints, and a window with more targets than
   the keys left can name will use three. Eighteen letters still name

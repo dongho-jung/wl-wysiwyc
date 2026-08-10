@@ -61,10 +61,11 @@ pub struct Keys {
     pub instant: bool,
     /// The keys that click. Either an xkb key name (`minus`, `return`,
     /// `space`) or the character itself, which is translated to the name the
-    /// compositor wants. A letter here is kept out of the hints and the grid
-    /// so it cannot mean two things at once.
-    pub left_click: String,
-    pub right_click: String,
+    /// compositor wants, and either one key or a list of them. A letter here
+    /// is kept out of the hints and the grid so it cannot mean two things at
+    /// once.
+    pub left_click: KeyList,
+    pub right_click: KeyList,
     /// An extra key that clears everything typed and starts the overlay's
     /// choices over, the way Esc does before it gives up. Worth setting to
     /// whatever key opens the overlay: while the overlay is up that key
@@ -77,6 +78,29 @@ pub struct Keys {
     /// Letters to keep out of hints and the grid, run together: `excluded:
     /// tyughvbn`. For the keys you would rather not have to reach for.
     pub excluded: String,
+    /// The key that swaps element hints for the letter grid. Empty means no
+    /// such key, which is what giving space away to a click leaves behind.
+    pub switch: String,
+}
+
+/// One key, or several. `left_click: minus` and `left_click: [minus, space]`
+/// both parse; the first is the common case and should not have to be a list.
+#[derive(Clone, Debug, Default)]
+pub struct KeyList(pub Vec<String>);
+
+impl<'de> Deserialize<'de> for KeyList {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum OneOrMany {
+            One(String),
+            Many(Vec<String>),
+        }
+        Ok(KeyList(match OneOrMany::deserialize(d)? {
+            OneOrMany::One(k) => vec![k],
+            OneOrMany::Many(ks) => ks,
+        }))
+    }
 }
 
 /// Which keyboard the letters are arranged on.
@@ -96,9 +120,13 @@ impl Default for Keys {
         Keys {
             confirm: false,
             instant: false,
-            left_click: "minus".into(),
-            right_click: "equal".into(),
+            // Enter costs nothing to give away: nothing else in the overlay
+            // wants it. Space is not here for the opposite reason, since it
+            // is what swaps hints for the grid.
+            left_click: KeyList(vec!["minus".into(), "return".into()]),
+            right_click: KeyList(vec!["equal".into()]),
             reset: String::new(),
+            switch: "space".into(),
             layout: Layout::default(),
             excluded: String::new(),
         }
@@ -106,15 +134,15 @@ impl Default for Keys {
 }
 
 impl Keys {
-    /// The name the compositor knows a click key by. Punctuation is easier to
-    /// write as itself than as `minus`, and in YAML a bare `-` means
-    /// something else entirely, so both spellings are accepted.
-    pub fn left(&self) -> String {
-        key_name(&self.left_click)
+    /// The names the compositor knows the click keys by. Punctuation is
+    /// easier to write as itself than as `minus`, and in YAML a bare `-`
+    /// means something else entirely, so both spellings are accepted.
+    pub fn left(&self) -> Vec<String> {
+        names(&self.left_click)
     }
 
-    pub fn right(&self) -> String {
-        key_name(&self.right_click)
+    pub fn right(&self) -> Vec<String> {
+        names(&self.right_click)
     }
 
     /// The reset key's name, if one is set.
@@ -122,12 +150,30 @@ impl Keys {
         Some(key_name(&self.reset)).filter(|k| !k.is_empty())
     }
 
-    /// The letters the click keys and the reset key have taken. They are
-    /// still bound while the overlay is up, as those keys.
+    /// The key that swaps hints for the grid, if it still has one.
+    pub fn switch(&self) -> Option<String> {
+        let name = key_name(&self.switch);
+        // A key cannot both click and switch. Clicking wins, since that is
+        // the one the config named twice on purpose.
+        Some(name)
+            .filter(|k| !k.is_empty())
+            .filter(|k| !self.left().contains(k) && !self.right().contains(k))
+    }
+
+    /// Every key name the overlay has already given a job to.
+    pub fn claimed(&self) -> Vec<String> {
+        let mut out = self.left();
+        out.extend(self.right());
+        out.extend(self.reset());
+        out.extend(self.switch());
+        out
+    }
+
+    /// The letters another key has taken. They are still bound while the
+    /// overlay is up, as those keys.
     pub fn taken_letters(&self) -> Vec<char> {
-        [Some(self.left()), Some(self.right()), self.reset()]
+        self.claimed()
             .into_iter()
-            .flatten()
             .filter_map(|k| {
                 let mut cs = k.chars();
                 match (cs.next(), cs.next()) {
@@ -154,6 +200,15 @@ impl Keys {
     }
 }
 
+/// The xkb names for a list of keys, in the order they were written.
+fn names(keys: &KeyList) -> Vec<String> {
+    keys.0
+        .iter()
+        .map(|k| key_name(k))
+        .filter(|k| !k.is_empty())
+        .collect()
+}
+
 /// The xkb name for a key written as itself. Letters and digits are already
 /// their own names; punctuation is not.
 fn key_name(key: &str) -> String {
@@ -166,6 +221,7 @@ fn key_name(key: &str) -> String {
         "." => "period",
         "/" => "slash",
         "\\" => "backslash",
+        "enter" => "return",
         "[" => "bracketleft",
         "]" => "bracketright",
         "`" => "grave",
@@ -335,9 +391,10 @@ mod tests {
         let c: Config = serde_yaml::from_str("{}").unwrap();
         assert!(!c.keys.confirm);
         assert!(!c.keys.instant);
-        assert_eq!(c.keys.left(), "minus");
-        assert_eq!(c.keys.right(), "equal");
+        assert_eq!(c.keys.left(), ["minus", "return"]);
+        assert_eq!(c.keys.right(), ["equal"]);
         assert_eq!(c.keys.reset(), None);
+        assert_eq!(c.keys.switch().as_deref(), Some("space"));
         assert_eq!(c.label.size, 11.5);
         assert_eq!(c.elements.max, 400);
     }
@@ -349,7 +406,7 @@ mod tests {
         )
         .unwrap();
         assert!(c.keys.confirm);
-        assert_eq!(c.keys.right(), "equal");
+        assert_eq!(c.keys.right(), ["equal"]);
         assert_eq!(c.label.size, 20.0);
         assert_eq!(c.label.pad_x, 4.5);
         assert!((c.colors.hint.r - 0.07).abs() < 0.01);
@@ -369,8 +426,8 @@ mod tests {
     fn punctuation_is_named_either_way() {
         let c: Config =
             serde_yaml::from_str("keys:\n  left_click: \"-\"\n  right_click: equal\n").unwrap();
-        assert_eq!(c.keys.left(), "minus");
-        assert_eq!(c.keys.right(), "equal");
+        assert_eq!(c.keys.left(), ["minus"]);
+        assert_eq!(c.keys.right(), ["equal"]);
         assert!(c.keys.reserved_letters().is_empty());
     }
 
@@ -385,6 +442,18 @@ mod tests {
         // Excluded keys are still bound while the overlay is up, so they do
         // nothing rather than reaching the window underneath.
         assert_eq!(c.keys.taken_letters(), vec!['f']);
+    }
+
+    #[test]
+    fn a_click_takes_one_key_or_several() {
+        let c: Config = serde_yaml::from_str(
+            "keys:\n  left_click: [\"-\", space, enter]\n  right_click: \"=\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.keys.left(), ["minus", "space", "return"]);
+        assert_eq!(c.keys.right(), ["equal"]);
+        // Space clicks now, so it cannot also swap hints for the grid.
+        assert_eq!(c.keys.switch(), None);
     }
 
     #[test]

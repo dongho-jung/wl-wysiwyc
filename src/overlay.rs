@@ -550,15 +550,13 @@ impl App {
             Key::RightClick => return self.click_picked(BTN_RIGHT, 1),
             Key::DoubleClick => return self.click_picked(BTN_LEFT, 2),
             Key::Reset => return self.reset_or_quit(),
+            Key::Switch => return self.switch_mode(),
             Key::Left => return self.step(-1.0, 0.0),
             Key::Right => return self.step(1.0, 0.0),
             Key::Up => return self.step(0.0, -1.0),
             Key::Down => return self.step(0.0, 1.0),
             Key::Char(ch) => ch.to_ascii_lowercase(),
         };
-        if ch == ' ' {
-            return self.switch_mode();
-        }
         if config::get().keys.confirm {
             // Every key is shown before it is taken: the first press arms it,
             // the same key again takes it, and any other key aims elsewhere.
@@ -1400,14 +1398,17 @@ fn key_of(event: &KeyEvent) -> Option<Key> {
         _ => {}
     }
     let name = keysym_name(event);
-    if name == cfg.left() {
+    if cfg.left().contains(&name) {
         return Some(Key::LeftClick);
     }
-    if name == cfg.right() {
+    if cfg.right().contains(&name) {
         return Some(Key::RightClick);
     }
     if cfg.reset().is_some_and(|k| k == name) {
         return Some(Key::Reset);
+    }
+    if cfg.switch().is_some_and(|k| k == name) {
+        return Some(Key::Switch);
     }
     event
         .utf8
