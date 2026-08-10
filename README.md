@@ -31,8 +31,9 @@ unless you have given it another job, `Tab` picks another window with
 `1`-`9`, `Backspace` undoes one press, and `Esc` backs out and then
 quits. Set `keys.reset` to the key that opens the overlay: pressing it
 starts the choices over, and pressing it with nothing to undo closes the
-overlay. `Ctrl+Esc` gets the keyboard back if a run is killed before it
-can tidy up.
+overlay. Moving the mouse closes it too, since reaching for it says the
+keyboard was not what you wanted. `Ctrl+Esc` gets the keyboard back if a
+run is killed before it can tidy up.
 
 Colours, label sizing, which keys click, and the limits on reading a
 window are set in `~/.config/wl-wysiwyc/config.yaml`, which is optional:

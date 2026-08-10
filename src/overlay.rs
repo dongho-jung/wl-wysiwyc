@@ -108,13 +108,10 @@ struct Glide {
 }
 
 impl Glide {
-    /// How long the trip takes. Long enough to follow, short enough not to
-    /// wait for.
-    const TIME: Duration = Duration::from_millis(110);
-
     /// Where the pointer should be now, and whether it has arrived.
     fn at(&self) -> ((f64, f64), bool) {
-        let t = (self.started.elapsed().as_secs_f64() / Self::TIME.as_secs_f64()).min(1.0);
+        let time = config::get().pointer.travel().as_secs_f64().max(0.001);
+        let t = (self.started.elapsed().as_secs_f64() / time).min(1.0);
         // Ease out: quick off the mark, gentle into the target.
         let e = 1.0 - (1.0 - t).powi(3);
         let x = self.from.0 + (self.to.0 - self.from.0) * e;
@@ -379,9 +376,16 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
     });
 
     // Where the pointer is, so a target can be travelled to rather than
-    // jumped to.
+    // jumped to, and so a hand on the mouse can be told from the overlay's
+    // own doing.
     let mut pointer_at = hypr::cursor_pos();
     let mut glide: Option<Glide> = None;
+    // Where the pointer was last seen to be, once it had stopped being moved
+    // from here. Compared against itself rather than against where it was
+    // last sent, so that the compositor lagging a step behind cannot read as
+    // a hand on the mouse.
+    let mut resting: Option<(f64, f64)> = None;
+    let mut looked = Instant::now();
 
     if let Some(smoke) = &smoke {
         let start = Instant::now();
@@ -417,6 +421,10 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
                     // rather than pointer steps: often enough to look like a
                     // fill, rarely enough that a whole output redraw keeps up.
                     Duration::from_millis(30)
+                } else if config::get().pointer.cancel_px > 0.0 {
+                    // Idle, but still watching the mouse. A hand reaching for
+                    // it should not have to wait to be noticed.
+                    Duration::from_millis(120)
                 } else {
                     Duration::from_secs(1)
                 };
@@ -472,14 +480,40 @@ pub fn run(snap: Snapshot, smoke: Option<Smoke>) -> Result<Option<(f64, f64)>, B
                         move_and_click(vp, to, extent, None, &mut queue, &mut app)?;
                     }
                 }
+                resting = None;
             }
             if let (Some(g), Some(vp)) = (glide.as_ref(), pointer.as_ref()) {
+                // The pointer is being moved from here, so where it is says
+                // nothing about hands.
+                looked = Instant::now();
+                resting = None;
                 let (at, done) = g.at();
                 let extent = app.snap.layout_extent;
                 move_and_click(vp, at, extent, None, &mut queue, &mut app)?;
                 pointer_at = Some(at);
                 if done {
                     glide = None;
+                }
+            }
+            // A hand on the mouse says the keyboard was not what was wanted
+            // after all, so get out of the way. Only a deliberate distance
+            // counts, and only while the overlay is not moving the pointer
+            // itself, since asking where it is costs a round trip through
+            // the compositor.
+            let cancel = config::get().pointer.cancel_px;
+            if cancel > 0.0 && glide.is_none() && looked.elapsed() > Duration::from_millis(120) {
+                looked = Instant::now();
+                if let Some(now) = hypr::cursor_pos() {
+                    match resting {
+                        // Nothing to compare against yet, or the pointer was
+                        // just sent somewhere: this is where it rests now.
+                        None => resting = Some(now),
+                        Some(was) if (now.0 - was.0).hypot(now.1 - was.1) > cancel => {
+                            app.exit = true;
+                            continue;
+                        }
+                        _ => {}
+                    }
                 }
             }
             if !app.exit && app.configured && app.dirty {

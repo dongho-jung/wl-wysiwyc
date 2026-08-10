@@ -164,6 +164,15 @@ nothing has been selected. An armed key is drawn pressed inside every
 label it would keep, a dark cap over that one character, and those
 labels turn green.
 
+Moving the mouse by hand closes the overlay. Reaching for it says the
+keyboard was not what was wanted after all, and an overlay in the way
+is the last thing that helps then. It takes `pointer.cancel_px` of
+movement, since a knock on the desk is not a decision, and it is
+measured against where the pointer was last seen to be resting rather
+than where the overlay last sent it: the compositor answers a step
+behind, and comparing against an order rather than an observation reads
+that lag as a hand.
+
 The overlay opens with the target already on whatever the pointer is
 nearest, so a click can need no typing at all, and the arrow keys move
 it from there. A step goes to the nearest target roughly in line that

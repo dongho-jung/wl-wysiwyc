@@ -45,6 +45,7 @@ pub struct Config {
     pub keys: Keys,
     pub click: Click,
     pub scroll: Scroll,
+    pub pointer: Pointer,
     pub label: Label,
     pub colors: Colors,
     pub elements: Elements,
@@ -314,6 +315,36 @@ fn key_name(key: &str) -> String {
         other => other,
     };
     named.to_string()
+}
+
+/// What the overlay does with the pointer.
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Pointer {
+    /// How far the mouse has to be moved by hand before the overlay gets out
+    /// of the way. Reaching for the mouse is saying the keyboard is not what
+    /// you want after all, but a knock on the desk is not, so it takes a
+    /// deliberate distance. Zero leaves the overlay up whatever the mouse
+    /// does.
+    pub cancel_px: f64,
+    /// How long the pointer takes to travel to a target. Long enough to
+    /// follow, short enough not to wait for.
+    pub travel_ms: u64,
+}
+
+impl Default for Pointer {
+    fn default() -> Self {
+        Pointer {
+            cancel_px: 24.0,
+            travel_ms: 110,
+        }
+    }
+}
+
+impl Pointer {
+    pub fn travel(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.travel_ms)
+    }
 }
 
 /// How much a scroll key moves the window under the pointer.

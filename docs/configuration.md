@@ -43,6 +43,19 @@ keys:
   scroll_up: semicolon
   scroll_down: apostrophe
 
+pointer:
+  # How far the mouse has to be moved by hand before the overlay gets
+  # out of the way. Reaching for the mouse says the keyboard was not
+  # what you wanted after all; a knock on the desk does not, so it takes
+  # a deliberate distance. 0 leaves the overlay up whatever the mouse
+  # does, and saves asking the compositor where the pointer is eight
+  # times a second while the overlay is open.
+  cancel_px: 24
+
+  # How long the pointer takes to travel to a target. Long enough to
+  # follow, short enough not to wait for; 0 jumps.
+  travel_ms: 110
+
 scroll:
   # Wheel notches per press, and per press with shift. There is no
   # scroll-to-the-end on a wheel, only more of it, so shift sends a run
