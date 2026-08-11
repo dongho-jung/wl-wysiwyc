@@ -1,6 +1,6 @@
 # How it works
 
-The tool runs in three steps: snapshot, overlay, click. The overlay
+The tool runs in three steps: snapshot, overlay, pointer input. The overlay
 opens on the focused window in one of two modes: element hints
 (preferred) and the letter grid (fallback).
 
@@ -95,26 +95,18 @@ One press is one key. A key that means nothing where you are is
 ignored, so a hint typed at speed is one press per character.
 
 Completing a hint or picking a grid tile does not click. It puts the
-pointer on that target and stops there, marked green with a ring, and
-then `left_click` (`-` or Enter by default) clicks it, `right_click`
-(`=`) right-clicks it, and typing another hint moves the target
-somewhere else. Moving the pointer is the point of the pause as much as
-the choice of button is: it is how the window under it shows a hover,
-and how a menu that only opens on hover can be opened at all.
+pointer on that target and stops there, marked green with a ring. Pressing
+`left_click` (`-` or Enter by default) immediately sends left-button down;
+`right_click` (`=`) does the same for the right button. Releasing the key
+sends button up and closes the overlay. A press and release without movement
+is a normal click.
 
-Holding a click key asks for more of them. The click lands when the key
-comes up, and how long it was down says how many: a tap clicks once,
-past `click.double_ms` twice, past `click.triple_ms` three times. A
-double click made this way is one gesture rather than two presses
-racing a timer. While the key is down the charge is drawn on the
-target: a ring gathers in on it as the step fills and lands as the
-count goes up, a wave breaks outward as it lands, the target's own
-outline thickens with what is stored, and a badge over it says the
-count outright, since a glow cannot be counted. The badge answers the
-only question worth asking mid-hold: let go now, and how many clicks is
-that? Nothing happens until the key comes up, however long it is held.
-Anything else pressed calls the hold off, which is how to back out of
-one started by mistake.
+Arrow movement and label selection stay active while the mouse button is
+down. Moving either way therefore sends pointer motion between the two button
+edges, exactly like a physical drag. The transparent overlay has no pointer
+input region, so every edge and motion reaches the window underneath. A
+cancelled run releases every held virtual button before destroying the
+pointer, which prevents a stuck drag.
 
 `keys.scroll_up` and `keys.scroll_down` (`;` and `'`) turn the wheel
 over whatever the pointer is on, without leaving the overlay: shift
@@ -145,17 +137,18 @@ anything, which is why the chrome is no use as the one to watch.
 
 Shift, ctrl and alt with a click key reach the window as themselves.
 The overlay never takes the keyboard, so the window under it already
-knows which modifiers are down, and injecting the click while they are
-held is all a shift click is. The submap binds every combination of the
+knows which modifiers are down, and injecting the button edges while they
+are held is all a shift click is. The submap binds every combination of the
 three to the same shortcut, which is what stops the compositor handing
 the combination back to the window as a keystroke instead.
 
 Two settings change this. `keys.instant` clicks the moment a hint is
-complete, skipping the pause and the choice. `keys.confirm` asks for
-every key twice: the first press arms it, and until it is pressed again
-nothing has been selected. An armed key is drawn pressed inside every
-label it would keep, a dark cap over that one character, and those
-labels turn green.
+complete, skipping the pause and the choice. It is suspended while a click
+key already holds a button down, so a completed hint continues that drag
+instead. `keys.confirm` asks for every key twice: the first press arms it,
+and until it is pressed again nothing has been selected. An armed key is
+drawn pressed inside every label it would keep, a dark cap over that one
+character, and those labels turn green.
 
 Moving the mouse by hand closes the overlay. Reaching for it says the
 keyboard was not what was wanted after all, and an overlay in the way
@@ -182,9 +175,9 @@ another queued move. Any non-arrow input clears the chord immediately.
 
 Modifiers select separate movement contracts:
 
-- `Shift+arrow` projects existing velocity onto the current input vector and
-  suppresses held-anchor steering. A one-key or two-key chord therefore stays
-  on one cardinal or diagonal line. Normal attraction resumes on release.
+- `Shift+arrow` follows the same visual path as repeated `Ctrl+arrow` presses
+  and jumps to its last anchor. It does no travel animation and does not
+  repeat while held.
 - `Alt+arrow` moves at the constant `pointer.direct_speed_px`. It applies no
   acceleration, inertia, attraction, or snap. Release leaves the pointer at
   its exact arbitrary coordinate, while the nearest anchor remains blue as a
@@ -192,10 +185,14 @@ Modifiers select separate movement contracts:
 - `Ctrl+arrow` does no travel animation. It chooses the next anchor in the
   requested visual row or column and sends the pointer there in one frame.
   The binding does not repeat while held, so one physical press means one
-  anchor jump. When no anchor remains that way, the same press scrolls on
-  that axis.
+  anchor jump. When no anchor remains that way, either directional jump
+  scrolls on that axis.
 
-All arrows currently down are combined before motion is integrated.
+Both jump modes refresh the compact anchor-dot frame. Labels return after
+`label.wake_ms`, just as they do when continuous motion stops.
+
+All continuous arrows currently down are combined before motion is
+integrated.
 Two perpendicular keys produce one normalized diagonal vector, so a
 diagonal is no faster than a cardinal direction. Releases update their own
 keys, so releasing right from a right-down chord continues downward instead
@@ -207,18 +204,19 @@ global-shortcut client. Continuous modes also repeat while physically held.
 The first press gets a lease long enough to reach the compositor's repeat
 delay; after repeats begin, every pulse renews a 120ms lease. If a compositor
 still drops every release edge, stopped repeats expire the direction instead
-of letting it accelerate to a screen edge. Ctrl's instant mode does not
-repeat.
+of letting it accelerate to a screen edge. Shift and Ctrl jumps do not repeat.
 
 When every arrow is released, drag first gives a projected coast endpoint.
 The anchor nearest that endpoint becomes the magnetic target. Using the
 endpoint rather than the pre-coast position preserves the direction of
 inertia near the midpoint between two anchors. The target is selected from
 all eligible anchors, with no distance cutoff, so released motion cannot
-stop in empty space. The anchor where the gesture started is temporarily
-ineligible for `pointer.departure_ms`. This keeps even a one-frame tap from
-being recaptured before it can move toward a neighboring anchor. If it is the
-only anchor, it becomes eligible again when the grace period expires.
+stop in empty space. The anchor where the gesture started and every anchor
+behind the requested direction are temporarily ineligible for
+`pointer.departure_ms`. A close anchor behind therefore cannot beat a distant
+anchor ahead after a short tap. Perpendicular and forward anchors remain
+eligible. If the guard leaves no candidate, every anchor becomes eligible
+again when the grace period expires.
 
 `pointer.attract_px` is the softness distance for that pull. The released
 pointer behaves like a stretched spring: force grows with distance beyond
@@ -232,8 +230,10 @@ under-damped spring and lands exactly on the anchor. It can arrive a little
 past and settle back first, which gives the landing its tension instead of
 making it stop dead.
 
-The departure grace applies to held steering, release attraction, and snap.
-After it expires, the original anchor participates like every other anchor.
+The directional departure grace applies to held steering, release attraction,
+and snap. It follows the active arrow chord if that direction changes. After
+it expires, the source and behind-direction anchors participate like every
+other anchor.
 
 The normal label frame and a compact frame of small red anchor dots are
 rendered before movement. The first arrow swaps the cached dot buffer onto
@@ -255,8 +255,9 @@ the pointer is pulled straight there at `pointer.travel_ms` without
 being flown. Nothing is redrawn during that trip, deliberately, since a
 whole output costs tens of milliseconds to paint and painting one
 mid-flight is what would make the flight look stepped; what the pointer
-is heading for lights up when it arrives. A click key acts on what the
-trip was going to, so pressing one mid-flight still lands there.
+is heading for lights up when it arrives. Pressing a click key mid-flight
+starts the button hold at the pointer's live coordinate, and the remaining
+travel becomes a drag.
 
 Esc unwinds what was typed and then leaves, and leaves on the first
 press when nothing has been typed yet. What the pointer is over is not a
@@ -325,13 +326,21 @@ whatever a label does end up on is still recognisable. Only the element
 about to be clicked is outlined, since ringing every candidate turns a
 dense corner of a window into a mess of boxes.
 
+Collision avoidance can leave a small element and its label far apart. A
+dotted connector then runs from the element center to the label edge. Its
+dots alternate the configured label or ring color with its RGB complement,
+and each has a light or dark opposing rim. A transparent Wayland surface
+cannot sample the window pixels underneath, so carrying both contrasts is
+what keeps the connector readable across light and dark content.
+
 ### Grid mode
 
 The window is divided into three rows following the same layout
 (`src/grid.rs`): on qwerty, ten tiles for q-p, nine for a-l, seven for
-z-m. A letter arms that tile and the same letter again clicks its
-center, the same two presses as a one-key hint. Space switches back to
-hint mode when elements exist.
+z-m. A letter selects that tile's center. With `keys.confirm` enabled,
+the first press arms it and the second selects it, just like a one-key
+hint. A click key then operates there. Space switches back to hint mode
+when elements exist.
 
 Excluded and taken letters are dropped from their row here, and the
 letters left spread out to fill it. The grid is what a window with no
@@ -427,14 +436,18 @@ the counts above are what it settles on.
   mpv, games) have no accessibility tree at all; the grid fallback
   covers them.
 
-## Click
+## Pointer buttons
 
-The chosen point is an element or tile center when named or magnetically
-snapped. A click taken while an arrow is still moving uses the ring's live
-coordinate. The point is recorded in global logical coordinates. The overlay
-is torn down, so the click cannot land on it, and the click is injected through
-`zwlr_virtual_pointer_v1`: absolute motion scaled to the output layout
-extent, then a left button press and release.
+Click-key presses and releases are injected through
+`zwlr_virtual_pointer_v1` while the overlay is present. Its empty pointer
+input region lets the window below receive those edges and every absolute
+motion between them. Releasing a click key ends the drag and then tears down
+the overlay. Cancelling releases all held buttons first.
+
+An instant hint selection is the exception. Its chosen element or tile center
+is recorded in global logical coordinates, the overlay is torn down, and the
+virtual pointer sends absolute motion followed by one left-button press and
+release.
 
 ## Debug flags
 
@@ -452,9 +465,8 @@ extent, then a left button press and release.
   is a run of presses, all but the last confirmed and the last one
   armed, so `--render out.pam 2 qw` is the overlay with Q confirmed and
   W armed; a trailing `.` confirms them all and arms nothing. A whole
-  label is a target picked out, and `dw:0.6` picks it out with a click
-  key held six tenths of the way through its hold. Laid over a
-  screenshot it is exactly what would have been on screen:
+  label is shown as the picked target. Laid over a screenshot it is
+  exactly what would have been on screen:
 
   ```
   grim -o HDMI-A-1 desk.png
@@ -480,7 +492,7 @@ extent, then a left button press and release.
   WL_TRACE=1 wl-wysiwyc --drill "right:60 wait:500" 2
   ```
 
-  Modifier modes use `straight-right`, `free-right`, or `instant-right`
+  Modifier modes use `end-right`, `free-right`, or `instant-right`
   (and the other directions) in a drill script.
 
   `WL_TRACE=1` adds a line per frame of the pointer's own motion, and
@@ -509,7 +521,7 @@ extent, then a left button press and release.
   partly unhinted (the grid still covers it). The walk costs three
   D-Bus round trips per node; `org.a11y.atspi.Cache.GetItems` would
   fetch roles, states, and the tree shape in one call instead.
-- Left click only, and the cursor stays where the click happened.
+- The cursor stays where the last click or drag ended.
 - Monitors left of or above the origin (negative layout coordinates)
   are not supported.
 - Rotated monitors are untested.

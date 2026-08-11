@@ -87,11 +87,12 @@ pointer:
 
   # A held arrow stays in control. After all arrows are released, the
   # nearest anchor to the projected coast endpoint attracts the pointer
-  # regardless of distance. The departure anchor is excluded for
-  # departure_ms so a short tap cannot be pulled straight back. attract_px
-  # is the softness distance used to scale the spring, not a cutoff. Pull
-  # grows stronger beyond it. Inside snap_px the spring finishes at the
-  # exact anchor coordinate.
+  # regardless of distance. The departure anchor and anchors behind the
+  # pressed direction are excluded for departure_ms, so a short tap cannot
+  # be pulled backward merely because that anchor is closer. attract_px is
+  # the softness distance used to scale the spring, not a cutoff. Pull grows
+  # stronger beyond it. Inside snap_px the spring finishes at the exact
+  # anchor coordinate.
   departure_ms: 160
   attract_px: 80
   snap_px: 8
@@ -114,20 +115,6 @@ scroll:
   # the last scroll, and then the window is read again.
   settle_ms: 120
 
-click:
-  # A click key clicks when it is let go, and how long it was held says
-  # how many times: a tap clicks once, holding past double_ms clicks
-  # twice, past triple_ms three times. Zero on either turns that step
-  # off, so double_ms: 0 leaves every click single.
-  double_ms: 450
-  triple_ms: 1100
-
-  # Show the charge while the key is down: a ring closing in on the
-  # target as the step fills, a wave as it lands, and a badge saying
-  # what letting go now would click, rather than a count timed in the
-  # head.
-  charge: true
-
 label:
   size: 11.5    # text size
   pad_x: 4.5    # space either side of the text
@@ -146,7 +133,6 @@ colors:
   armed_key: "#053d26eb"    # the armed key, shown pressed in them
   armed_key_text: "#8cffd1"
   ring: "#40eba1f2"         # around the element about to be clicked
-  charge: "#fac94af2"       # the first level of a held click key
   dot: "#e83e33f0"          # an anchor during keyboard navigation
   nearest_dot: "#40a3fff5"  # the anchor nearest the moving pointer
   tile: "#14141a33"         # grid tiles
@@ -164,24 +150,28 @@ elements:
 - `pointer.repeat_ms`, `pointer.repeat_min_ms`, and `pointer.reach_px`
   are accepted so an older config still loads, but continuous navigation
   does not use them. Remove them after adding the motion settings above.
+- The retired `click` block and `colors.charge` are also accepted but
+  ignored, so configs from the old charging and multi-click behavior load.
 - The two `keys` switches are worth trying first. The default is the
   quickest: type the hint, then `-` to click. `instant: true` drops that
   press and clicks the moment the hint is complete, faster and less
-  forgiving. `confirm: true` goes the other way and wants every key
-  twice.
+  forgiving. A mouse button already held by a click key takes precedence,
+  so completing a hint still moves the pointer and continues that drag.
+  `confirm: true` goes the other way and wants every key twice.
 - A click key does not have to be one of the defaults. Any key xkb can
   name works, and if it is a letter the hints and the grid make room by
   leaving that letter out. The same goes for `reset` and `switch`.
-- Several keys can click. `left_click: [minus, space, enter]` clicks on
-  any of the three. They are one shortcut with three keys on it, not
-  three shortcuts.
+- Several keys can drive the same button. `left_click: [minus, space,
+  enter]` uses the left mouse button from any of the three. They are one
+  shortcut with three keys on it, not three shortcuts.
 - Shift, ctrl and alt with a click key are passed through: the overlay
   never holds the keyboard, so the window already knows which modifiers
-  are down when the click lands, and holding one only stops the
+  are down when the button edge lands, and holding one only stops the
   compositor giving the combination back to the window as a keystroke.
-- A hold is called off by pressing anything else, so a key held by
-  mistake costs nothing, and nothing is clicked until the key comes up
-  however long it is held.
+- Pressing a click key sends mouse-button down immediately. Releasing it
+  sends mouse-button up and closes the overlay. Arrow movement and label
+  selection remain active in between, so they drag from the current point
+  to the new one. A press and release without movement is a normal click.
 - Excluding letters costs capacity, not correctness: fewer keys means
   more windows need two-key hints, and a window with more targets than
   the keys left can name will use three. Eighteen letters still name
@@ -191,6 +181,10 @@ elements:
   reachable.
 - Labels are slightly transparent on purpose, so a small icon under one
   is still recognisable. End `hint` with `ff` for solid labels.
+- Collision avoidance can leave a label detached from a small element. When
+  the visible gap is large enough, alternating configured and complementary
+  dots join the element's center to the label edge. Each dot has an opposite
+  light or dark rim, so the connector remains visible on mixed backgrounds.
 - `dim` is transparent by default. The labels carry themselves against
   most windows, and darkening the screen to read them is a tax on every
   glance; `#00000047` is the old look if the contrast is wanted.

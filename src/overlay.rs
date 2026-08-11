@@ -61,6 +61,7 @@ const MOTION_FRAME: Duration = Duration::from_millis(8);
 const EDGE_SCROLL_INTERVAL: Duration = Duration::from_millis(90);
 const EDGE_INSET: f64 = 3.0;
 const INITIAL_THRUST: f64 = 0.32;
+const LABEL_CONNECTOR_MIN: f32 = 12.0;
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -129,10 +130,16 @@ impl Drill {
             "right" => Ok(Key::Arrow(Arrow::Right, NavMode::Normal)),
             "up" => Ok(Key::Arrow(Arrow::Up, NavMode::Normal)),
             "down" => Ok(Key::Arrow(Arrow::Down, NavMode::Normal)),
-            "straight-left" | "shift-left" => Ok(Key::Arrow(Arrow::Left, NavMode::Straight)),
-            "straight-right" | "shift-right" => Ok(Key::Arrow(Arrow::Right, NavMode::Straight)),
-            "straight-up" | "shift-up" => Ok(Key::Arrow(Arrow::Up, NavMode::Straight)),
-            "straight-down" | "shift-down" => Ok(Key::Arrow(Arrow::Down, NavMode::Straight)),
+            "end-left" | "straight-left" | "shift-left" => {
+                Ok(Key::Arrow(Arrow::Left, NavMode::End))
+            }
+            "end-right" | "straight-right" | "shift-right" => {
+                Ok(Key::Arrow(Arrow::Right, NavMode::End))
+            }
+            "end-up" | "straight-up" | "shift-up" => Ok(Key::Arrow(Arrow::Up, NavMode::End)),
+            "end-down" | "straight-down" | "shift-down" => {
+                Ok(Key::Arrow(Arrow::Down, NavMode::End))
+            }
             "free-left" | "alt-left" => Ok(Key::Arrow(Arrow::Left, NavMode::Free)),
             "free-right" | "alt-right" => Ok(Key::Arrow(Arrow::Right, NavMode::Free)),
             "free-up" | "alt-up" => Ok(Key::Arrow(Arrow::Up, NavMode::Free)),
@@ -180,6 +187,41 @@ enum Stage {
     PickHint { win: usize },
 }
 
+/// A short-lived filter that keeps a new directional gesture from choosing
+/// its source or an anchor behind the requested direction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DepartureGuard {
+    anchor: (f64, f64),
+    direction: (f64, f64),
+}
+
+impl DepartureGuard {
+    fn new(anchor: (f64, f64), direction: (f64, f64)) -> Self {
+        let mut guard = Self {
+            anchor,
+            direction: (0.0, 0.0),
+        };
+        guard.aim(direction);
+        guard
+    }
+
+    fn aim(&mut self, direction: (f64, f64)) {
+        let length = direction.0.hypot(direction.1);
+        if length > f64::EPSILON {
+            self.direction = (direction.0 / length, direction.1 / length);
+        }
+    }
+
+    fn excludes(self, point: (f64, f64)) -> bool {
+        let offset = (point.0 - self.anchor.0, point.1 - self.anchor.1);
+        let source = offset.0.hypot(offset.1) <= 0.5;
+        // A half-pixel tolerance keeps a nearly perpendicular row or column
+        // eligible despite small coordinate differences.
+        let behind = offset.0 * self.direction.0 + offset.1 * self.direction.1 < -0.5;
+        source || behind
+    }
+}
+
 /// The pointer as something with weight, pulled at a target rather than put
 /// on one.
 ///
@@ -195,11 +237,12 @@ struct Drift {
     /// `to`: attraction changes velocity continuously, while `to` is the
     /// close-range spring that commits the landing to an exact point.
     magnet: Option<(f64, f64)>,
-    /// The anchor this held input departed. It cannot steer the initial push,
-    /// attract the release, or catch the pointer during a short grace period.
-    ignore: Option<(f64, f64)>,
-    /// Seconds left in the departure anchor grace period.
-    ignore_for: f64,
+    /// The anchor this input departed and the direction it requested. The
+    /// source and anchors behind that direction cannot steer, attract, or
+    /// catch the pointer during a short grace period.
+    departure: Option<DepartureGuard>,
+    /// Seconds left in the directional departure grace period.
+    departure_for: f64,
     /// How hard a named or snapped target pulls, in radians a second.
     rate: f64,
     /// Seconds of uninterrupted directional thrust in the current gesture.
@@ -219,8 +262,8 @@ impl Drift {
             vel: (0.0, 0.0),
             to: Some(to),
             magnet: None,
-            ignore: None,
-            ignore_for: 0.0,
+            departure: None,
+            departure_for: 0.0,
             rate,
             push_age: 0.0,
             nav: NavMode::Normal,
@@ -234,8 +277,8 @@ impl Drift {
             vel: (0.0, 0.0),
             to: None,
             magnet: None,
-            ignore: None,
-            ignore_for: 0.0,
+            departure: None,
+            departure_for: 0.0,
             rate: config::get().pointer.spring(),
             push_age: 0.0,
             nav: NavMode::Normal,
@@ -247,16 +290,19 @@ impl Drift {
         self.vel.0.hypot(self.vel.1)
     }
 
-    fn ignore_departure(&mut self, anchor: (f64, f64)) {
-        self.ignore = Some(anchor);
-        self.ignore_for = config::get().pointer.departure_ms as f64 / 1000.0;
+    fn guard_departure(&mut self, anchor: (f64, f64), direction: (f64, f64)) {
+        self.departure = Some(DepartureGuard::new(anchor, direction));
+        self.departure_for = config::get().pointer.departure_ms as f64 / 1000.0;
     }
 
-    fn release_target(&mut self) {
+    fn release_target(&mut self, direction: (f64, f64)) {
+        if let Some(departure) = self.departure.as_mut() {
+            departure.aim(direction);
+        }
         let released = self.to.take().or(self.magnet.take());
         self.magnet = None;
         if let Some(target) = released {
-            self.ignore_departure(target);
+            self.guard_departure(target, direction);
             // A named or magnetic spring can be moving quickly in a
             // direction unrelated to the arrow the user just pressed. Free
             // navigation starts from rest; inertia belongs to arrow motion,
@@ -320,17 +366,17 @@ impl Drift {
             // Direct calls to the physics step get the same immediate arrow
             // takeover as the event loop. No magnetic velocity is allowed to
             // masquerade as a key that is still held.
-            self.release_target();
+            self.release_target(thrust);
             self.nav = mode;
         }
-        if self.ignore.is_some() {
-            self.ignore_for = (self.ignore_for - dt).max(0.0);
+        if self.departure.is_some() {
+            self.departure_for = (self.departure_for - dt).max(0.0);
         }
-        if self.ignore.is_some() && self.ignore_for <= f64::EPSILON {
-            // A short release must not immediately choose the anchor it just
-            // left. Once the grace period ends, it becomes eligible again so
-            // an isolated anchor can still pull the pointer home.
-            self.ignore = None;
+        if self.departure.is_some() && self.departure_for <= f64::EPSILON {
+            // A short release must not immediately choose its source or an
+            // anchor behind the requested direction. Once the grace period
+            // ends, every anchor becomes eligible again.
+            self.departure = None;
         }
         if !pushing && self.nav == NavMode::Free {
             self.to = None;
@@ -371,7 +417,7 @@ impl Drift {
                     self.at
                 };
                 self.magnet =
-                    nearest_point(projected, anchors, self.ignore).map(|(anchor, _)| anchor);
+                    nearest_point(projected, anchors, self.departure).map(|(anchor, _)| anchor);
             }
             if let Some(anchor) = self.magnet {
                 let away = (anchor.0 - self.at.0).hypot(anchor.1 - self.at.1);
@@ -400,10 +446,6 @@ impl Drift {
                     let speed = cfg.direct_speed_px.max(1.0);
                     self.vel = (thrust.0 * speed, thrust.1 * speed);
                 } else {
-                    if pushing && mode == NavMode::Straight {
-                        let along = (self.vel.0 * thrust.0 + self.vel.1 * thrust.1).max(0.0);
-                        self.vel = (thrust.0 * along, thrust.1 * along);
-                    }
                     if fresh_push {
                         let along = self.vel.0 * thrust.0 + self.vel.1 * thrust.1;
                         let launch = cfg.launch_speed_px.max(0.0).min(cfg.speed_px.max(1.0));
@@ -419,7 +461,8 @@ impl Drift {
                 if pushing && mode == NavMode::Normal {
                     // A held arrow remains in control. The nearest anchor can
                     // bend its path, but cannot catch it or overpower it.
-                    if let Some(((tx, ty), away)) = nearest_point(self.at, anchors, self.ignore) {
+                    if let Some(((tx, ty), away)) = nearest_point(self.at, anchors, self.departure)
+                    {
                         let speed = self.speed();
                         if away > f64::EPSILON && away < reach && speed > 5.0 {
                             let influence = (1.0 - away / reach).sqrt();
@@ -493,7 +536,7 @@ impl Drift {
             }
             Some(_) => false,
             None => {
-                !pushing && self.magnet.is_none() && self.ignore.is_none() && self.speed() < 5.0
+                !pushing && self.magnet.is_none() && self.departure.is_none() && self.speed() < 5.0
             }
         }
     }
@@ -503,12 +546,12 @@ impl Drift {
 fn nearest_point(
     at: (f64, f64),
     anchors: &[(f64, f64)],
-    ignore: Option<(f64, f64)>,
+    departure: Option<DepartureGuard>,
 ) -> Option<((f64, f64), f64)> {
     anchors
         .iter()
         .copied()
-        .filter(|p| ignore.is_none_or(|skip| (p.0 - skip.0).hypot(p.1 - skip.1) > 0.5))
+        .filter(|point| departure.is_none_or(|guard| !guard.excludes(*point)))
         .map(|p| (p, (p.0 - at.0).hypot(p.1 - at.1)))
         .min_by(|a, b| a.1.total_cmp(&b.1))
 }
@@ -578,6 +621,22 @@ fn pull(
             a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
         })
         .map(|(i, _)| i)
+}
+
+/// Follow the same visual path as repeated next-anchor jumps and return its
+/// final box. Every step moves farther along the requested axis, so the walk
+/// cannot revisit a box.
+fn pull_to_end(from: Rect, way: (f64, f64), boxes: &[Rect], wander: bool) -> Option<usize> {
+    let mut from = from;
+    let mut last = None;
+    for _ in 0..boxes.len() {
+        let Some(next) = pull(from, way, boxes, f64::INFINITY, wander) else {
+            break;
+        };
+        from = boxes[next];
+        last = Some(next);
+    }
+    last
 }
 
 /// Keep a keyboard-driven pointer inside its active window and report each
@@ -715,19 +774,63 @@ impl ArrowKeys {
     }
 }
 
-/// A click key held down. A tap clicks once, and every step of the hold
-/// after that asks for one more click; another key while it is down calls
-/// the whole thing off.
-struct Charge {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ButtonEdge {
     button: u32,
-    started: Instant,
+    down: bool,
 }
 
-impl Charge {
-    /// How many clicks the hold stands at, and how far along it is to the
-    /// next one.
-    fn at(&self) -> (u32, f32) {
-        config::get().click.stage(self.started.elapsed())
+/// Mouse buttons driven by click-key edges. State changes are queued because
+/// key callbacks cannot borrow the virtual pointer that lives in the run loop.
+#[derive(Default)]
+struct ButtonInput {
+    held: Vec<u32>,
+    pending: VecDeque<ButtonEdge>,
+    finish: bool,
+}
+
+impl ButtonInput {
+    fn press(&mut self, button: u32) -> bool {
+        if self.held.contains(&button) {
+            return false;
+        }
+        self.held.push(button);
+        self.pending.push_back(ButtonEdge { button, down: true });
+        true
+    }
+
+    fn release(&mut self, button: u32) -> bool {
+        let Some(i) = self.held.iter().position(|held| *held == button) else {
+            return false;
+        };
+        self.held.swap_remove(i);
+        self.pending.push_back(ButtonEdge {
+            button,
+            down: false,
+        });
+        self.finish = true;
+        true
+    }
+
+    fn release_all(&mut self) {
+        for button in self.held.drain(..) {
+            self.pending.push_back(ButtonEdge {
+                button,
+                down: false,
+            });
+        }
+    }
+
+    fn next(&mut self) -> Option<ButtonEdge> {
+        self.pending.pop_front()
+    }
+
+    fn any(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    fn take_finish(&mut self) -> bool {
+        std::mem::take(&mut self.finish)
     }
 }
 
@@ -777,10 +880,8 @@ struct App {
     dirty: bool,
     stage: Stage,
     exit: bool,
-    /// Where to click on the way out, with which button, and how many times.
+    /// Where an instant hint selection clicks on the way out.
     target: Option<(f64, f64)>,
-    button: u32,
-    clicks: u32,
     /// Where to send the pointer once the loop can get to it.
     aim: Option<(f64, f64)>,
     /// An anchor jump waiting to be sent without spring travel.
@@ -790,9 +891,10 @@ struct App {
     hints: Vec<Hint>,
     /// Keys already confirmed, narrowing the hints.
     typed: String,
-    /// A click key held down, and since when. How long it is held decides
-    /// whether the click is single, double or triple.
-    charge: Option<Charge>,
+    /// Live mouse-button state and edges waiting for the virtual pointer.
+    buttons: ButtonInput,
+    /// Drills exercise navigation without sending button events to a window.
+    buttons_enabled: bool,
     /// A scroll waiting for the loop to send it, and when to look at the
     /// window again once the scrolling stops.
     scroll: VecDeque<Wheel>,
@@ -804,7 +906,7 @@ struct App {
     /// With `keys.confirm` on, a key pressed once and not taken yet: it shows
     /// what it would select, and pressing it again takes it.
     armed: Option<char>,
-    /// What is highlighted and where a click key acts. During free movement
+    /// What is highlighted and its selected coordinate. During free movement
     /// the target is the nearest anchor but the point is the pointer itself.
     picked: Option<(Target, (f64, f64))>,
     /// What the pointer is nearest at this moment, which is what is drawn
@@ -888,9 +990,8 @@ impl Query {
     }
 }
 
-/// Show the overlay and return the chosen global click position, or None
-/// if the user cancelled. The click itself is performed here as well,
-/// after the overlay is torn down.
+/// Show the overlay and return the final global click or drag position, or
+/// None if the user cancelled.
 pub fn run(
     snap: Snapshot,
     smoke: Option<Smoke>,
@@ -958,14 +1059,13 @@ pub fn run(
         stage,
         exit: false,
         target: None,
-        button: BTN_LEFT,
-        clicks: 1,
         aim: None,
         teleport: None,
         stop_motion: false,
         hints: Vec::new(),
         typed: String::new(),
-        charge: None,
+        buttons: ButtonInput::default(),
+        buttons_enabled: drill.is_none(),
         scroll: VecDeque::new(),
         settle: None,
         edge_scrolled: [None; 4],
@@ -1063,8 +1163,9 @@ pub fn run(
         visible: false,
     });
 
-    // One virtual pointer for the whole run: it sends the pointer to a picked
-    // target while the overlay is up, and clicks once it comes down.
+    // One virtual pointer for the whole run: it sends live motion and button
+    // edges while the overlay is up, and handles an instant click after it
+    // comes down.
     let pointer = vp_manager.as_ref().map(|mgr| {
         let seat = app.seat_state.seats().next();
         mgr.create_virtual_pointer(seat.as_ref(), &qh, ())
@@ -1074,6 +1175,7 @@ pub fn run(
     // jumped to, and so a hand on the mouse can be told from the overlay's
     // own doing.
     let mut pointer_at = hypr::cursor_pos();
+    let mut live_target = None;
     let mut drift: Option<Drift> = None;
     // Where the pointer was last seen to be, once it had stopped being moved
     // from here. Compared against itself rather than against where it was
@@ -1140,11 +1242,6 @@ pub fn run(
                     // Often enough to catch a scroll that went past the
                     // overlay; the check itself is one message.
                     Duration::from_millis(40)
-                } else if app.charging() {
-                    // A held key is drawn, not moved, so it wants frames
-                    // rather than pointer steps: often enough to look like a
-                    // fill, rarely enough that a whole output redraw keeps up.
-                    Duration::from_millis(30)
                 } else if drilling && pending.is_some() {
                     Duration::from_millis(20)
                 } else if app.navigating.is_some() {
@@ -1240,6 +1337,24 @@ pub fn run(
                     }
                 }
             }
+            let mut sent_button = false;
+            while let Some(edge) = app.buttons.next() {
+                let vp = pointer
+                    .as_ref()
+                    .ok_or("compositor does not expose zwlr_virtual_pointer_manager_v1")?;
+                send_button(vp, edge);
+                sent_button = true;
+            }
+            if sent_button {
+                queue.flush()?;
+            }
+            if app.buttons.take_finish() {
+                // The release is already on the wire. Stop before another
+                // motion frame can move the pointer after the drag ended.
+                live_target = pointer_at;
+                app.exit = true;
+                continue;
+            }
             if let Some(vp) = pointer.as_ref() {
                 while let Some(wheel) = app.scroll.pop_front() {
                     send_scroll(vp, wheel);
@@ -1258,9 +1373,6 @@ pub fn run(
                 && drift.is_none()
             {
                 app.resettle();
-            }
-            if app.charging() {
-                app.dirty = true;
             }
             // A named target wants the pointer on it. Doing that here rather
             // than where it was picked keeps the requests and their roundtrip
@@ -1310,14 +1422,14 @@ pub fn run(
             let (thrust, nav_mode) = app.motion();
             if app.any_arrow() {
                 match drift.as_mut() {
-                    Some(d) => d.release_target(),
+                    Some(d) => d.release_target(thrust),
                     None => {
                         let from = pointer_at.unwrap_or_default();
                         let mut next = Drift::free(from);
                         if let Some((_, anchor, _)) =
                             app.nearest(from).filter(|(_, _, away)| *away <= CAUGHT)
                         {
-                            next.ignore_departure(anchor);
+                            next.guard_departure(anchor, thrust);
                         }
                         drift = Some(next);
                     }
@@ -1349,8 +1461,6 @@ pub fn run(
                         "spring"
                     } else if d.magnet.is_some() {
                         "attract"
-                    } else if thrust != (0.0, 0.0) && nav_mode == NavMode::Straight {
-                        "straight"
                     } else if thrust != (0.0, 0.0) && nav_mode == NavMode::Free {
                         "direct"
                     } else {
@@ -1447,9 +1557,23 @@ pub fn run(
         }
     }
 
-    // Unmap the overlay before injecting the click so the click reaches
-    // the window below instead of this surface. Dropping the shortcuts first
-    // puts the keyboard back the way it was.
+    // A cancelled run may leave a physical click key down. Release every
+    // virtual button before the pointer disappears so the window below never
+    // inherits a stuck drag.
+    app.buttons.release_all();
+    let mut released_button = false;
+    while let Some(edge) = app.buttons.next() {
+        if let Some(vp) = pointer.as_ref() {
+            send_button(vp, edge);
+            released_button = true;
+        }
+    }
+    if released_button {
+        queue.roundtrip(&mut app)?;
+    }
+
+    // Unmap the overlay before an instant hint selection clicks. Dropping the
+    // shortcuts first puts the keyboard back the way it was.
     drop(shortcuts);
     if let Some(pointer) = app.pointer_overlay.take() {
         pointer.subsurface.destroy();
@@ -1467,12 +1591,11 @@ pub fn run(
             .as_ref()
             .ok_or("compositor does not expose zwlr_virtual_pointer_manager_v1")?;
         let extent = app.snap.layout_extent;
-        let click = (app.button, app.clicks);
-        move_and_click(vp, target, extent, Some(click), &mut queue, &mut app)?;
+        move_and_click(vp, target, extent, Some(BTN_LEFT), &mut queue, &mut app)?;
         vp.destroy();
         queue.roundtrip(&mut app)?;
     }
-    Ok(app.target)
+    Ok(app.target.or(live_target))
 }
 
 /// Wait for the compositor to have something to say, or for the timeout to
@@ -1563,27 +1686,35 @@ fn send_pointer_motion(
     vp.frame();
 }
 
+fn send_button(vp: &ZwlrVirtualPointerV1, edge: ButtonEdge) {
+    let state = match edge.down {
+        true => wl_pointer::ButtonState::Pressed,
+        false => wl_pointer::ButtonState::Released,
+    };
+    vp.button(0, edge.button, state);
+    vp.frame();
+}
+
 fn move_and_click<S>(
     vp: &ZwlrVirtualPointerV1,
     at: (f64, f64),
     extent: (i32, i32),
-    click: Option<(u32, u32)>,
+    click: Option<u32>,
     queue: &mut wayland_client::EventQueue<S>,
     state: &mut S,
 ) -> Result<(), Box<dyn Error>> {
     send_pointer_motion(vp, at, extent);
     queue.roundtrip(state)?;
-    if let Some((button, times)) = click {
-        for n in 0..times.max(1) {
-            // A pause the toolkit underneath can tell apart: too quick and
-            // the two presses of a double click arrive as one.
-            std::thread::sleep(Duration::from_millis(if n == 0 { 20 } else { 40 }));
-            vp.button(0, button, wl_pointer::ButtonState::Pressed);
-            vp.frame();
-            vp.button(0, button, wl_pointer::ButtonState::Released);
-            vp.frame();
-            queue.roundtrip(state)?;
-        }
+    if let Some(button) = click {
+        send_button(vp, ButtonEdge { button, down: true });
+        send_button(
+            vp,
+            ButtonEdge {
+                button,
+                down: false,
+            },
+        );
+        queue.roundtrip(state)?;
     }
     Ok(())
 }
@@ -1741,7 +1872,7 @@ impl App {
         None
     }
 
-    /// The button a key clicks with, if it is a click key at all.
+    /// The mouse button a click key drives.
     fn click_button(key: Key) -> Option<u32> {
         match key {
             Key::LeftClick => Some(BTN_LEFT),
@@ -1796,7 +1927,6 @@ impl App {
         self.settle = Some(Instant::now() + config::get().scroll.settle());
         self.typed.clear();
         self.armed = None;
-        self.charge = None;
         self.dirty = true;
         // Carry the labels along rather than leave them behind. Whatever the
         // document moved by, everything in it moved by, so the labels can
@@ -1844,7 +1974,6 @@ impl App {
 
         self.typed.clear();
         self.armed = None;
-        self.charge = None;
         self.aim = None;
         self.teleport = None;
         self.stop_motion = false;
@@ -1872,87 +2001,33 @@ impl App {
         self.dirty = true;
     }
 
-    /// Whether a hold is running and drawing, which is what the loop watches
-    /// to keep the fill moving.
-    fn charging(&self) -> bool {
-        self.charge.is_some() && config::get().click.charge
-    }
-
-    /// The box the fill sits under: whatever a click would land on, in global
-    /// logical coordinates.
-    fn charge_target(&self) -> Option<(f64, f64, f64, f64)> {
-        if self.free {
-            let (_, (x, y)) = self.picked?;
-            return Some((x - 8.0, y - 8.0, 16.0, 16.0));
-        }
-        match (self.picked?, self.stage) {
-            ((Target::Hint(i), _), _) => self.hints.get(i).map(|h| (h.rx, h.ry, h.rw, h.rh)),
-            ((Target::Tile(ch), _), Stage::PickTile { win }) => {
-                let w = &self.snap.windows[win];
-                grid::tile_for(w.w as f64, w.h as f64, ch)
-                    .map(|t| (w.x as f64 + t.x, w.y as f64 + t.y, t.w, t.h))
+    /// A click key coming up releases the matching virtual mouse button.
+    fn release(&mut self, key: Key) {
+        if let Some(button) = Self::click_button(key) {
+            if self.buttons_enabled {
+                self.buttons.release(button);
             }
-            _ => None,
-        }
-    }
-
-    /// A click key going down starts a hold rather than clicking: how long it
-    /// stays down is what says how many clicks are wanted.
-    fn hold(&mut self, button: u32) {
-        if self.picked.is_none() || self.settle.is_some() {
             return;
         }
-        self.charge = Some(Charge {
-            button,
-            started: Instant::now(),
-        });
-        self.dirty = true;
-    }
-
-    /// A click key coming up spends the hold.
-    fn release(&mut self, key: Key) {
         match key {
-            Key::Arrow(_, NavMode::Instant) => return,
-            Key::Arrow(way, mode) => return self.hold_arrow(way.index(), mode, false),
+            Key::Arrow(_, NavMode::End | NavMode::Instant) => (),
+            Key::Arrow(way, mode) => self.hold_arrow(way.index(), mode, false),
             _ => {}
         }
-        let (Some(button), Some(charge)) = (Self::click_button(key), self.charge.take()) else {
-            return;
-        };
-        self.dirty = true;
-        if charge.button != button {
-            return;
-        }
-        self.spend(charge);
-    }
-
-    fn spend(&mut self, charge: Charge) {
-        let clicks = config::get().click.clicks(charge.started.elapsed());
-        self.click_picked(charge.button, clicks);
     }
 
     fn press(&mut self, key: Key) {
+        if let Some(button) = Self::click_button(key) {
+            if self.buttons_enabled && self.buttons.press(button) {
+                self.fresh = false;
+            }
+            return;
+        }
         if !key.is_motion_arrow() {
             // Any deliberate non-navigation input ends the chord. This also
             // recovers from a compositor release event that never arrived.
             self.arrows.clear();
             self.stop_motion = true;
-        }
-        match (&self.charge, Self::click_button(key)) {
-            // Held keys repeat. A repeat is not a second press, and taking it
-            // for one would restart the hold it is meant to be measuring.
-            (Some(c), Some(b)) if c.button == b => return,
-            // Anything else pressed mid-hold calls the click off, which is
-            // how to back out of a hold started by mistake. The key that did
-            // it still means what it means.
-            (Some(_), _) => {
-                self.charge = None;
-                self.dirty = true;
-            }
-            _ => {}
-        }
-        if let Some(button) = Self::click_button(key) {
-            return self.hold(button);
         }
         let ch = match key {
             Key::Escape => return self.cancel(),
@@ -1960,11 +2035,12 @@ impl App {
             Key::Tab => return self.pick_window(),
             Key::Reset => return self.reset_or_quit(),
             Key::Switch => return self.switch_mode(),
-            Key::Arrow(way, NavMode::Instant) => return self.jump_anchor(way),
+            Key::Arrow(way, NavMode::End) => return self.jump_anchor(way, true),
+            Key::Arrow(way, NavMode::Instant) => return self.jump_anchor(way, false),
             Key::Arrow(way, mode) => return self.hold_arrow(way.index(), mode, true),
             Key::Scroll(w) => return self.roll(w),
             Key::Char(ch) => ch.to_ascii_lowercase(),
-            // Taken above, before anything could cancel a hold.
+            // Taken above, before navigation state can be changed.
             Key::LeftClick | Key::RightClick => return,
         };
         if config::get().keys.confirm {
@@ -2032,13 +2108,11 @@ impl App {
         }
     }
 
-    /// A hint or tile is complete. Either click it straight away, or take it
-    /// as the target and wait to be told which button, which is what makes
-    /// the overlay usable for a hover or a right click as well as a click.
+    /// A hint or tile is complete. An instant selection clicks unless a mouse
+    /// button is already down, in which case moving there continues the drag.
     fn pick(&mut self, what: Target, at: (f64, f64)) {
-        if config::get().keys.instant {
+        if config::get().keys.instant && !self.buttons.any() {
             self.target = Some(at);
-            self.button = BTN_LEFT;
             self.exit = true;
             return;
         }
@@ -2114,8 +2188,9 @@ impl App {
         }
     }
 
-    /// Move immediately to the next anchor in one cardinal direction.
-    fn jump_anchor(&mut self, way: Arrow) {
+    /// Move immediately to the next anchor, or the last anchor reached by
+    /// following that same directional path.
+    fn jump_anchor(&mut self, way: Arrow, to_end: bool) {
         if matches!(self.stage, Stage::PickWindow) || self.settle.is_some() {
             return;
         }
@@ -2143,9 +2218,18 @@ impl App {
             .filter(|(what, _, _)| Some(*what) != current)
             .collect();
         let boxes: Vec<Rect> = candidates.iter().map(|(_, _, rect)| *rect).collect();
-        let Some(next) = pull(mine, way.vector(), &boxes, f64::INFINITY, true) else {
+        let next = match to_end {
+            true => pull_to_end(mine, way.vector(), &boxes, true),
+            false => pull(mine, way.vector(), &boxes, f64::INFINITY, true),
+        };
+        let now = Instant::now();
+        self.navigating = Some(now);
+        if !self.show_navigation_frame() {
+            self.dirty = true;
+        }
+        let Some(next) = next else {
             // With no further anchor, the same intent continues into the
-            // document instead of making the instant-navigation key inert.
+            // document instead of making the directional key inert.
             self.queue_edge_scroll(way);
             return;
         };
@@ -2153,7 +2237,6 @@ impl App {
         self.fresh = false;
         self.typed.clear();
         self.armed = None;
-        self.charge = None;
         self.aim = None;
         self.teleport = Some((what, at));
         self.stop_motion = true;
@@ -2177,7 +2260,6 @@ impl App {
         self.navigating = Some(now);
         self.typed.clear();
         self.armed = None;
-        self.charge = None;
         if !self.show_navigation_frame() {
             self.dirty = true;
         }
@@ -2277,17 +2359,6 @@ impl App {
         if let Some((what, at)) = nearest {
             self.focus(what, at);
         }
-    }
-
-    /// Click whatever was picked, and leave.
-    fn click_picked(&mut self, button: u32, clicks: u32) {
-        let Some((_, at)) = self.picked else {
-            return;
-        };
-        self.target = Some(at);
-        self.button = button;
-        self.clicks = clicks;
-        self.exit = true;
     }
 
     /// Space swaps element hints for the letter grid and back.
@@ -2485,25 +2556,7 @@ impl App {
         self.dirty = false;
         let dots = self.dots();
         let previously_showed_dots = self.showed_dots;
-        // Worked out before the buffer is borrowed, since it reads the hints
-        // and the snapshot that the borrow would tie up.
-        let charge = self
-            .charge
-            .as_ref()
-            .filter(|_| self.charging())
-            .and_then(|c| {
-                let (ex, ey, ew, eh) = self.charge_target()?;
-                let mon = &self.snap.monitor;
-                let s = self.buffer_scale as f64;
-                let rect = Rect::new(
-                    ((ex - mon.x as f64) * s) as f32,
-                    ((ey - mon.y as f64) * s) as f32,
-                    (ew * s) as f32,
-                    (eh * s) as f32,
-                );
-                Some((rect, c.at()))
-            });
-        let Some(buffer) = self.render_frame(dots, charge) else {
+        let Some(buffer) = self.render_frame(dots) else {
             return;
         };
         if !self.attach_frame(&buffer) {
@@ -2511,23 +2564,23 @@ impl App {
         }
         self.showed_dots = dots;
 
-        // Keep an unused compact frame across normal redraws such as click
-        // charge animation. If it was just on screen, replace it: the old
-        // slot may remain active until the compositor sees this commit.
+        // Keep an unused compact frame across normal redraws. If it was just
+        // on screen, replace it: the old slot may remain active until the
+        // compositor sees this commit.
         if dots {
             self.navigation_buffer = None;
         } else if matches!(self.stage, Stage::PickHint { .. })
             && (previously_showed_dots || self.navigation_buffer.is_none())
         {
             self.navigation_buffer = None;
-            self.navigation_buffer = self.render_frame(true, None);
+            self.navigation_buffer = self.render_frame(true);
         }
     }
 
     /// Paint one complete parent frame without attaching it. Normal draws
     /// attach the label frame and retain the compact frame for the next arrow
     /// press.
-    fn render_frame(&mut self, dots: bool, charge: Option<(Rect, (u32, f32))>) -> Option<Buffer> {
+    fn render_frame(&mut self, dots: bool) -> Option<Buffer> {
         let scale = self.buffer_scale;
         let bw = self.width as i32 * scale;
         let bh = self.height as i32 * scale;
@@ -2596,9 +2649,6 @@ impl App {
                 };
                 draw_pick_hint(&self.snap, win, view, &self.font, &mut canvas, scale)
             }
-        }
-        if let Some((rect, at)) = charge {
-            draw_charge(&mut canvas, rect, at, &self.font, scale as f32);
         }
         Some(buffer)
     }
@@ -2673,12 +2723,6 @@ pub fn render(
     };
     canvas.clear(*config::get().colors.dim);
     let w = snap.windows.get(win).ok_or("no such window; see --list")?;
-    // "dw:0.6" is that label picked out with a click key held six tenths of
-    // the way through, which is the only way to look at the fill.
-    let (keys, held) = match keys.split_once(':') {
-        Some((k, f)) => (k, f.parse::<f32>().ok()),
-        None => (keys, None),
-    };
     let els = atspi::clickable_elements(w.pid, &w.title, (w.w, w.h)).unwrap_or_else(|e| {
         eprintln!("atspi: {e}");
         Vec::new()
@@ -2693,28 +2737,8 @@ pub fn render(
         }
         None => typed.pop(),
     };
-    let charge = |canvas: &mut Canvas, el: Rect| {
-        if let Some(t) = held {
-            let cfg = &config::get().click;
-            let stage = cfg.stage(cfg.span().mul_f32(t.clamp(0.0, 1.0)));
-            draw_charge(canvas, el, stage, &font, scale as f32);
-        }
-    };
     if els.is_empty() {
         draw_pick_tile(snap, win, armed, None, &font, &mut canvas, scale);
-        // A whole tile letter is a tile picked out, the same as a whole label.
-        if let Some(t) = keys.chars().next().filter(|_| keys.chars().count() == 1) {
-            if let Some(tile) = grid::tile_for(w.w as f64, w.h as f64, t) {
-                let mon = &snap.monitor;
-                let el = Rect::new(
-                    ((w.x - mon.x) as f64 + tile.x) as f32 * scale as f32,
-                    ((w.y - mon.y) as f64 + tile.y) as f32 * scale as f32,
-                    tile.w as f32 * scale as f32,
-                    tile.h as f32 * scale as f32,
-                );
-                charge(&mut canvas, el);
-            }
-        }
         return Ok((buf, bw, bh));
     }
     let hints = hints_for(w, &els);
@@ -2741,19 +2765,6 @@ pub fn render(
             .map(|h| (h.cx + 40.0, h.cy + 12.0)),
     };
     draw_pick_hint(snap, win, view, &font, &mut canvas, scale);
-    if let Some(i) = picked {
-        let h = &hints[i];
-        let mon = &snap.monitor;
-        charge(
-            &mut canvas,
-            Rect::new(
-                ((h.rx - mon.x as f64) * scale as f64) as f32,
-                ((h.ry - mon.y as f64) * scale as f64) as f32,
-                (h.rw * scale as f64) as f32,
-                (h.rh * scale as f64) as f32,
-            ),
-        );
-    }
     Ok((buf, bw, bh))
 }
 
@@ -2926,6 +2937,106 @@ impl LabelBox {
         } else {
             ox as i64 * oy as i64
         }
+    }
+}
+
+/// Join a detached label to the center of its element. Labels that still
+/// overlap their element already identify it directly, and short gaps do not
+/// need another mark competing with the page underneath.
+fn label_connector(
+    element: Rect,
+    label: Rect,
+    min_length: f32,
+) -> Option<((f32, f32), (f32, f32))> {
+    let overlaps = element.x < label.x + label.w
+        && label.x < element.x + element.w
+        && element.y < label.y + label.h
+        && label.y < element.y + element.h;
+    if overlaps {
+        return None;
+    }
+
+    let from = (element.x + element.w / 2.0, element.y + element.h / 2.0);
+    let center = (label.x + label.w / 2.0, label.y + label.h / 2.0);
+    let vector = (center.0 - from.0, center.1 - from.1);
+    let distance = vector.0.hypot(vector.1);
+    if distance <= f32::EPSILON {
+        return None;
+    }
+    // Walk back from the label center until the segment reaches its near
+    // edge. The chip itself hides everything after that point.
+    let across_x = if vector.0.abs() > f32::EPSILON {
+        label.w / 2.0 / vector.0.abs()
+    } else {
+        f32::INFINITY
+    };
+    let across_y = if vector.1.abs() > f32::EPSILON {
+        label.h / 2.0 / vector.1.abs()
+    } else {
+        f32::INFINITY
+    };
+    let hidden = across_x.min(across_y).clamp(0.0, 1.0);
+    let to = (
+        from.0 + vector.0 * (1.0 - hidden),
+        from.1 + vector.1 * (1.0 - hidden),
+    );
+    ((to.0 - from.0).hypot(to.1 - from.1) >= min_length).then_some((from, to))
+}
+
+/// The opposite RGB color, used beside the configured connector color so one
+/// of each adjacent pair remains distinct from most page backgrounds.
+fn connector_complement(color: Color) -> Color {
+    Color::new(1.0 - color.r, 1.0 - color.g, 1.0 - color.b, color.a)
+}
+
+/// A light or dark rim chosen against the dot itself. The overlay cannot read
+/// pixels from the window below its transparent surface, so each dot carries
+/// both sides of the contrast instead of guessing at the page color.
+fn connector_outline(color: Color) -> Color {
+    let luma = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
+    let alpha = color.a * 0.68;
+    match luma > 0.55 {
+        true => Color::new(0.01, 0.01, 0.02, alpha),
+        false => Color::new(1.0, 1.0, 1.0, alpha),
+    }
+}
+
+/// A two-tone dotted line. Alternating complementary fills and opposite
+/// light/dark rims keep it legible across mixed light and dark content.
+fn draw_dotted_connector(
+    canvas: &mut Canvas,
+    from: (f32, f32),
+    to: (f32, f32),
+    base: Color,
+    scale: f32,
+) {
+    let vector = (to.0 - from.0, to.1 - from.1);
+    let distance = vector.0.hypot(vector.1);
+    if distance <= f32::EPSILON {
+        return;
+    }
+    let count = (distance / (5.5 * scale)).floor().max(1.0) as usize;
+    let pair = [base, connector_complement(base)];
+    let outer_radius = 1.35 * scale;
+    let inner_radius = 0.78 * scale;
+    for i in 0..=count {
+        let t = i as f32 / count as f32;
+        let center = (from.0 + vector.0 * t, from.1 + vector.1 * t);
+        let fill = pair[i % pair.len()];
+        let outer = Rect::new(
+            center.0 - outer_radius,
+            center.1 - outer_radius,
+            outer_radius * 2.0,
+            outer_radius * 2.0,
+        );
+        let inner = Rect::new(
+            center.0 - inner_radius,
+            center.1 - inner_radius,
+            inner_radius * 2.0,
+            inner_radius * 2.0,
+        );
+        canvas.round_rect(outer, outer_radius, connector_outline(fill));
+        canvas.round_rect(inner, inner_radius, fill.fade(0.82));
     }
 }
 
@@ -3139,6 +3250,29 @@ fn draw_pick_hint(
         return;
     }
     let boxes = place_labels(hints, font, (mon.x, mon.y), (canvas.w, canvas.h), scale);
+    // Collision avoidance can put a label far enough from a small element
+    // that their ownership is no longer obvious. Connect only those detached
+    // pairs, beneath the labels and any selected-element outline.
+    for (i, (h, b)) in hints.iter().zip(&boxes).enumerate() {
+        if !h.label.starts_with(typed) {
+            continue;
+        }
+        let element = Rect::new(
+            ((h.rx - mon.x as f64) * scale as f64) as f32,
+            ((h.ry - mon.y as f64) * scale as f64) as f32,
+            (h.rw * scale as f64) as f32,
+            (h.rh * scale as f64) as f32,
+        );
+        let Some((from, to)) = label_connector(element, b.rect(), LABEL_CONNECTOR_MIN * s) else {
+            continue;
+        };
+        let hot = picked == Some(i) || preview.as_deref().is_some_and(|p| h.label.starts_with(p));
+        let color = match hot {
+            true => lit(*config::get().colors.ring),
+            false => lit(*config::get().colors.hint),
+        };
+        draw_dotted_connector(canvas, from, to, color, s);
+    }
     // What the armed key keeps is drawn last so nothing can cover it.
     for pass_hot in [false, true] {
         for (i, (h, b)) in hints.iter().zip(&boxes).enumerate() {
@@ -3226,103 +3360,6 @@ fn draw_pick_hint(
     }
 }
 
-/// The charge on a held click key: what it has stored up, and what is coming.
-///
-/// A ring gathers in on the target as the step fills and lands on it when the
-/// count goes up, a wave breaks outward at the moment it does, the target's
-/// own outline thickens and glows with what is stored, and a badge says the
-/// count outright. The badge is the part that answers the only question that
-/// matters while holding: let go now, and how many clicks is that?
-fn draw_charge(canvas: &mut Canvas, el: Rect, (level, frac): (u32, f32), font: &Font, s: f32) {
-    let cfg = config::get();
-    let tone = |n: u32| match n {
-        0 | 1 => *cfg.colors.charge,
-        2 => *cfg.colors.armed,
-        _ => *cfg.colors.ring,
-    };
-    let ink = |n: u32| match n {
-        0 | 1 => *cfg.colors.hint_text,
-        _ => *cfg.colors.armed_text,
-    };
-    let radius = 5.0 * s;
-    let here = tone(level);
-    let top = cfg.click.levels();
-
-    // What is stored: the target sits inside a ring that grows with it.
-    canvas.round_rect_shadow(el, radius, (9.0 + 6.0 * level as f32) * s, here.fade(0.42));
-    canvas.round_rect_outline(el, radius, (1.6 + 1.1 * level as f32) * s, here);
-    // Nothing more is coming, and the target says so by wearing two more.
-    if level >= top {
-        for (pad, alpha) in [(5.0, 0.7), (10.0, 0.3)] {
-            let pad = pad * s;
-            canvas.round_rect_outline(el.grow(pad), radius + pad, 1.6 * s, here.fade(alpha));
-        }
-    }
-
-    // What is coming: a ring closing in, quicker the nearer it gets, so the
-    // moment it lands is the moment the count goes up.
-    if level < top {
-        let ease = frac * frac;
-        let pad = (22.0 - 18.0 * ease) * s;
-        canvas.round_rect_outline(
-            el.grow(pad),
-            radius + pad,
-            (1.2 + 2.6 * ease) * s,
-            tone(level + 1).fade(0.12 + 0.85 * ease),
-        );
-    }
-
-    // And the wave off the one that just landed, which is what makes a step
-    // something you feel rather than something you notice afterwards.
-    if level > 1 && frac < 0.4 {
-        let k = frac / 0.4;
-        for (lag, weight) in [(0.0, 1.0), (0.25, 0.45)] {
-            let k = ((k - lag) / (1.0 - lag)).clamp(0.0, 1.0);
-            let pad = (3.0 + 46.0 * k) * s;
-            canvas.round_rect_outline(
-                el.grow(pad),
-                radius + pad,
-                (3.4 - 2.2 * k) * s,
-                here.fade((1.0 - k) * (1.0 - k) * 0.9 * weight),
-            );
-        }
-    }
-
-    // The count, in as many words. A badge over the target, or under it when
-    // the target sits against the top of the screen.
-    let px = cfg.label.size * (1.25 + 0.12 * level as f32) * s;
-    let text = format!("x{level}");
-    let (pad_x, pad_y) = (cfg.label.pad_x * s, cfg.label.pad_y * s);
-    let bw = draw::text_width(font, &text, px) + 2.0 * pad_x;
-    let bh = px + 2.0 * pad_y;
-    let above = el.y - bh - 7.0 * s;
-    let badge = Rect::new(
-        el.x + (el.w - bw) / 2.0,
-        if above > 0.0 {
-            above
-        } else {
-            (el.y + el.h + 7.0 * s).min(canvas.h as f32 - bh)
-        },
-        bw,
-        bh,
-    );
-    canvas.round_rect_shadow(
-        badge.shift(0.0, 1.5 * s),
-        bh * 0.35,
-        5.0 * s,
-        shade(*cfg.colors.shadow, 0.75),
-    );
-    canvas.round_rect(badge, bh * 0.35, here);
-    canvas.text_centered(
-        font,
-        &text,
-        badge.x + bw / 2.0,
-        badge.y + bh / 2.0,
-        px,
-        ink(level),
-    );
-}
-
 /// How wide a label's text is once its characters are spaced out.
 fn label_width(font: &Font, label: &str, px: f32, s: f32) -> f32 {
     let n = label.chars().count().saturating_sub(1) as f32;
@@ -3385,7 +3422,7 @@ fn mode_of(modifiers: Modifiers) -> NavMode {
     } else if modifiers.alt {
         NavMode::Free
     } else if modifiers.shift {
-        NavMode::Straight
+        NavMode::End
     } else {
         NavMode::Normal
     }
@@ -3655,8 +3692,9 @@ wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerV1);
 #[cfg(test)]
 mod tests {
     use super::{
-        arrow_direction, config, constrain_to_window, mode_of, pull, Arrow, ArrowKeys, Drift,
-        Drill, Key, Modifiers, NavMode, Rect,
+        arrow_direction, config, connector_complement, connector_outline, constrain_to_window,
+        label_connector, mode_of, pull, pull_to_end, Arrow, ArrowKeys, ButtonEdge, ButtonInput,
+        Color, Drift, Drill, Key, Modifiers, NavMode, Rect, BTN_LEFT, BTN_RIGHT,
     };
     use std::time::{Duration, Instant};
 
@@ -3769,7 +3807,7 @@ mod tests {
 
     #[test]
     fn a_drill_can_select_each_modifier_mode() {
-        let drill = Drill::parse("straight-right free-down instant-left").unwrap();
+        let drill = Drill::parse("end-right free-down instant-left").unwrap();
         assert_eq!(
             drill
                 .steps
@@ -3777,7 +3815,7 @@ mod tests {
                 .map(|(keys, _)| keys[0])
                 .collect::<Vec<_>>(),
             vec![
-                Key::Arrow(Arrow::Right, NavMode::Straight),
+                Key::Arrow(Arrow::Right, NavMode::End),
                 Key::Arrow(Arrow::Down, NavMode::Free),
                 Key::Arrow(Arrow::Left, NavMode::Instant),
             ]
@@ -3788,14 +3826,9 @@ mod tests {
     fn a_late_release_cannot_cancel_a_new_modifier_mode() {
         let start = Instant::now();
         let mut arrows = ArrowKeys::default();
-        arrows.set(1, NavMode::Straight, true, start);
+        arrows.set(1, NavMode::Normal, true, start);
         arrows.set(1, NavMode::Free, true, start + Duration::from_millis(10));
-        arrows.set(
-            1,
-            NavMode::Straight,
-            false,
-            start + Duration::from_millis(20),
-        );
+        arrows.set(1, NavMode::Normal, false, start + Duration::from_millis(20));
         assert_eq!(
             arrows.motion(start + Duration::from_millis(30)),
             (RIGHT, NavMode::Free)
@@ -3809,7 +3842,7 @@ mod tests {
                 shift: true,
                 ..Modifiers::default()
             }),
-            NavMode::Straight
+            NavMode::End
         );
         assert_eq!(
             mode_of(Modifiers {
@@ -3924,17 +3957,6 @@ mod tests {
     }
 
     #[test]
-    fn shift_motion_stays_on_its_input_line() {
-        let mut d = Drift::free((450.0, 470.0));
-        let anchor = (500.0, 500.0);
-        for _ in 0..50 {
-            d.advance_as(0.008, RIGHT, NavMode::Straight, &[anchor], WALL);
-        }
-        assert_eq!(d.at.1, 470.0, "straight mode bent toward an anchor");
-        assert_eq!(d.vel.1, 0.0, "straight mode gained sideways velocity");
-    }
-
-    #[test]
     fn alt_motion_has_constant_speed_and_stops_where_released() {
         let mut d = Drift::free((450.0, 500.0));
         let anchor = (800.0, 600.0);
@@ -3959,6 +3981,100 @@ mod tests {
             Rect::new(80.0, 44.0, 40.0, 20.0),
         ];
         assert_eq!(pull(from, RIGHT, &boxes, f64::INFINITY, true), Some(1));
+    }
+
+    #[test]
+    fn shift_selection_reaches_the_end_of_the_ctrl_path() {
+        let from = Rect::new(0.0, 0.0, 40.0, 20.0);
+        let boxes = [
+            Rect::new(300.0, 0.0, 40.0, 20.0),
+            Rect::new(80.0, 0.0, 40.0, 20.0),
+            Rect::new(80.0, 44.0, 40.0, 20.0),
+        ];
+        assert_eq!(pull_to_end(from, RIGHT, &boxes, true), Some(0));
+    }
+
+    #[test]
+    fn only_detached_labels_get_connectors() {
+        let element = Rect::new(10.0, 10.0, 10.0, 10.0);
+        let touching = Rect::new(25.0, 10.0, 10.0, 10.0);
+        let overlapping = Rect::new(18.0, 10.0, 10.0, 10.0);
+        let detached = Rect::new(40.0, 10.0, 10.0, 10.0);
+
+        assert!(label_connector(element, touching, 12.0).is_none());
+        assert!(label_connector(element, overlapping, 12.0).is_none());
+        assert_eq!(
+            label_connector(element, detached, 12.0),
+            Some(((15.0, 15.0), (40.0, 15.0)))
+        );
+    }
+
+    #[test]
+    fn connector_dots_pair_complements_with_opposite_rims() {
+        let base = Color::new(0.98, 0.79, 0.29, 0.88);
+        let complement = connector_complement(base);
+        assert!((base.r + complement.r - 1.0).abs() < f32::EPSILON);
+        assert!((base.g + complement.g - 1.0).abs() < f32::EPSILON);
+        assert!((base.b + complement.b - 1.0).abs() < f32::EPSILON);
+        assert_eq!(base.a, complement.a);
+
+        let bright_rim = connector_outline(base);
+        let dark_rim = connector_outline(complement);
+        assert!(bright_rim.r < 0.1 && bright_rim.g < 0.1 && bright_rim.b < 0.1);
+        assert!(dark_rim.r > 0.9 && dark_rim.g > 0.9 && dark_rim.b > 0.9);
+    }
+
+    #[test]
+    fn click_keys_queue_one_live_button_edge_each() {
+        let mut buttons = ButtonInput::default();
+        assert!(buttons.press(BTN_LEFT));
+        assert!(!buttons.press(BTN_LEFT), "a key repeat pressed twice");
+        assert!(buttons.any());
+        assert_eq!(
+            buttons.next(),
+            Some(ButtonEdge {
+                button: BTN_LEFT,
+                down: true,
+            })
+        );
+        assert_eq!(buttons.next(), None);
+
+        assert!(buttons.release(BTN_LEFT));
+        assert!(!buttons.any());
+        assert_eq!(
+            buttons.next(),
+            Some(ButtonEdge {
+                button: BTN_LEFT,
+                down: false,
+            })
+        );
+        assert!(buttons.take_finish());
+        assert!(!buttons.take_finish());
+    }
+
+    #[test]
+    fn cancelling_releases_every_held_button() {
+        let mut buttons = ButtonInput::default();
+        buttons.press(BTN_LEFT);
+        buttons.press(BTN_RIGHT);
+        assert_eq!(buttons.next().map(|edge| edge.down), Some(true));
+        assert_eq!(buttons.next().map(|edge| edge.down), Some(true));
+
+        buttons.release_all();
+        assert!(!buttons.any());
+        assert_eq!(
+            [buttons.next(), buttons.next()],
+            [
+                Some(ButtonEdge {
+                    button: BTN_LEFT,
+                    down: false,
+                }),
+                Some(ButtonEdge {
+                    button: BTN_RIGHT,
+                    down: false,
+                }),
+            ]
+        );
     }
 
     #[test]
@@ -4053,7 +4169,7 @@ mod tests {
         let ahead = (598.0, 500.0);
         let mut d = Drift::free((522.0, 500.0));
         d.vel = (456.0, 0.0);
-        d.ignore_departure(behind);
+        d.guard_departure(behind, RIGHT);
 
         d.advance(0.008, NONE, &[behind, ahead], WALL);
 
@@ -4124,7 +4240,7 @@ mod tests {
     fn a_short_release_near_an_anchor_settles_exactly() {
         let anchor = (500.0, 500.0);
         let mut d = Drift::free(anchor);
-        d.ignore_departure(anchor);
+        d.guard_departure(anchor, RIGHT);
         let mut furthest = d.at.0;
         for _ in 0..8 {
             d.advance(0.008, RIGHT, &[anchor], WALL);
@@ -4148,12 +4264,12 @@ mod tests {
         let origin = (500.0, 500.0);
         let adjacent = (514.0, 500.0);
         let mut d = Drift::free(origin);
-        d.ignore_departure(origin);
+        d.guard_departure(origin, RIGHT);
 
         d.advance(0.008, RIGHT, &[origin, adjacent], WALL);
         d.advance(0.008, NONE, &[origin, adjacent], WALL);
 
-        assert_eq!(d.ignore, Some(origin));
+        assert_eq!(d.departure.map(|guard| guard.anchor), Some(origin));
         assert_eq!(d.magnet, Some(adjacent));
         assert!(d.to.is_none(), "the departure anchor snapped the short tap");
         for _ in 0..300 {
@@ -4165,15 +4281,33 @@ mod tests {
     }
 
     #[test]
+    fn a_short_tap_rejects_a_closer_anchor_behind_its_direction() {
+        let behind = (490.0, 500.0);
+        let source = (500.0, 500.0);
+        let ahead = (900.0, 500.0);
+        let mut d = Drift::free(source);
+        d.guard_departure(source, RIGHT);
+
+        d.advance(0.008, RIGHT, &[behind, source, ahead], WALL);
+        d.advance(0.008, NONE, &[behind, source, ahead], WALL);
+
+        assert_eq!(d.magnet, Some(ahead));
+        assert!(d.vel.0 > 0.0, "the closer anchor behind reversed the tap");
+    }
+
+    #[test]
     fn a_departure_anchor_returns_after_its_grace_period() {
         let anchor = (500.0, 500.0);
         let mut d = Drift::free(anchor);
-        d.ignore_departure(anchor);
+        d.guard_departure(anchor, RIGHT);
         let ticks = config::get().pointer.departure_ms / 8 + 2;
         for _ in 0..ticks {
             d.advance(0.008, RIGHT, &[anchor], WALL);
         }
-        assert!(d.ignore.is_none(), "departure anchor grace did not expire");
+        assert!(
+            d.departure.is_none(),
+            "directional departure grace did not expire"
+        );
 
         d.at = (anchor.0 + 6.0, anchor.1);
         d.vel = NONE;
@@ -4201,10 +4335,10 @@ mod tests {
         let target = (500.0, 500.0);
         let mut d = Drift::toward((400.0, 500.0), target, rate());
         d.vel = (-700.0, 250.0);
-        d.release_target();
+        d.release_target(RIGHT);
         assert!(d.to.is_none());
-        assert_eq!(d.ignore, Some(target));
-        assert!(d.ignore_for > 0.0);
+        assert_eq!(d.departure.map(|guard| guard.anchor), Some(target));
+        assert!(d.departure_for > 0.0);
         assert_eq!(d.vel, NONE);
     }
 

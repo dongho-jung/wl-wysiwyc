@@ -106,7 +106,7 @@ impl Arrow {
 pub enum NavMode {
     #[default]
     Normal,
-    Straight,
+    End,
     Free,
     Instant,
 }
@@ -115,7 +115,7 @@ impl NavMode {
     fn modifiers(self) -> &'static [&'static str] {
         match self {
             Self::Normal => &[""],
-            Self::Straight => &["SHIFT"],
+            Self::End => &["SHIFT"],
             Self::Free => &["ALT", "SHIFT + ALT"],
             Self::Instant => &["CTRL", "CTRL + SHIFT", "CTRL + ALT", "CTRL + SHIFT + ALT"],
         }
@@ -124,7 +124,7 @@ impl NavMode {
     fn id(self) -> &'static str {
         match self {
             Self::Normal => "",
-            Self::Straight => "straight-",
+            Self::End => "end-",
             Self::Free => "free-",
             Self::Instant => "instant-",
         }
@@ -156,11 +156,11 @@ impl Key {
     }
 
     pub(crate) fn is_motion_arrow(self) -> bool {
-        matches!(self, Self::Arrow(_, mode) if mode != NavMode::Instant)
+        matches!(self, Self::Arrow(_, NavMode::Normal | NavMode::Free))
     }
 
     pub(crate) fn repeats(self) -> bool {
-        matches!(self, Self::Arrow(_, mode) if mode != NavMode::Instant)
+        self.is_motion_arrow()
     }
 
     pub(crate) fn transparent(self) -> bool {
@@ -315,7 +315,7 @@ pub fn keys() -> Vec<Key> {
     out.extend(
         [
             NavMode::Normal,
-            NavMode::Straight,
+            NavMode::End,
             NavMode::Free,
             NavMode::Instant,
         ]
@@ -427,7 +427,7 @@ mod tests {
     fn every_arrow_modifier_has_a_distinct_binding() {
         let cases: [(NavMode, &str, &[&str], bool); 4] = [
             (NavMode::Normal, "left", &["left"], true),
-            (NavMode::Straight, "straight-left", &["SHIFT + left"], true),
+            (NavMode::End, "end-left", &["SHIFT + left"], false),
             (
                 NavMode::Free,
                 "free-left",

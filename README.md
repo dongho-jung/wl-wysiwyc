@@ -19,24 +19,29 @@ nearest. Arrow keys accelerate it freely, two at once move diagonally,
 and releasing one keeps the other direction held. Even the shortest press
 gets a small initial nudge, then acceleration ramps gently for control
 between dense anchors. The anchor it leaves is briefly excluded so a tap is
-not pulled straight back. Releasing every arrow keeps the current inertia,
-then a distance-sensitive spring attracts the pointer to the anchor nearest
-its projected coast endpoint regardless of distance. Entering the small
-snap zone places it exactly on that anchor. `Shift+arrow` keeps the thrust on
-one straight line. `Alt+arrow` moves at a constant speed with no acceleration,
-inertia, attraction, or snap, so it can stop at an arbitrary coordinate.
-`Ctrl+arrow` jumps instantly to the next anchor in that direction. Pushing
-against a window edge scrolls the window on the same axis. Typing a hint
-sends the pointer straight to its target. During keyboard motion the hint
-labels give way to small red anchor dots from a pre-rendered frame; the
-nearest one is blue. A small focus ring moves independently above them, so
+not pulled straight back. Anchors behind the pressed direction are excluded
+for the same brief grace period, so a nearby anchor behind cannot beat a
+distant one ahead. Releasing every arrow keeps the current inertia, then a
+distance-sensitive spring attracts the pointer to the anchor nearest its
+projected coast endpoint regardless of distance. Entering the small
+snap zone places it exactly on that anchor. `Shift+arrow` jumps instantly to
+the last anchor reached in that direction. `Alt+arrow` moves at a constant
+speed with no acceleration, inertia, attraction, or snap, so it can stop at an
+arbitrary coordinate. `Ctrl+arrow` jumps instantly to the next anchor in that
+direction. Pushing against a window edge scrolls the window on the same axis.
+Typing a hint
+sends the pointer straight to its target. During keyboard navigation the hint
+labels give way to small red anchor dots from a pre-rendered frame. The nearest
+one is blue during free motion. A small focus ring moves independently, so
 repainting the screen cannot stall the pointer. `-` and `Enter` click and
-`=` right-clicks;
-`keys.left_click` takes a list, so give it as many keys as you like. Hold a
-click key instead of tapping it to double-click, hold longer to triple-click,
-and hold `Shift`, `Ctrl` or `Alt` with it to have the window see those too. A
-hint's keys are where its target is: the keyboard is laid over the window, so
-on qwerty
+`=` right-clicks. Pressing a click key holds that mouse button down immediately,
+and releasing the key releases the button and closes the overlay. Move with
+arrows or type another label while it is held to drag there. `keys.left_click`
+takes a list, so give it as many keys as you like, and `Shift`, `Ctrl` or `Alt`
+with a click key reaches the window too. A hint's keys are where its target is.
+When collision avoidance moves a label farther away, an outlined two-tone
+dotted connector identifies its target across light and dark content. The
+keyboard is laid over the window, so on qwerty
 something in the bottom-left corner is labelled `z` and something in the
 top-right `p`. Set `keys.layout` for dvorak, or for no layout at all,
 and `keys.excluded` to keep letters you would rather not reach for out

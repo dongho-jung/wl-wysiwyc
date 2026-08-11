@@ -43,77 +43,14 @@ fn load() -> Config {
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub keys: Keys,
-    pub click: Click,
+    /// Accepted so configs from the charging-click behavior keep loading.
+    #[serde(rename = "click")]
+    _legacy_click: Option<serde_yaml::Value>,
     pub scroll: Scroll,
     pub pointer: Pointer,
     pub label: Label,
     pub colors: Colors,
     pub elements: Elements,
-}
-
-/// What holding a click key down does. A tap clicks once; keeping the key
-/// down asks for the click twice, then three times, which is a steadier way
-/// to double click than pressing anything twice in a row.
-#[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Click {
-    /// Hold at least this long for a double click, and this long for a
-    /// triple. Zero on either turns that step off.
-    pub double_ms: u64,
-    pub triple_ms: u64,
-    /// Fill the target as the hold goes on, so the count is something you
-    /// watch rather than count out.
-    pub charge: bool,
-}
-
-impl Default for Click {
-    fn default() -> Self {
-        Click {
-            double_ms: 450,
-            triple_ms: 1100,
-            charge: true,
-        }
-    }
-}
-
-impl Click {
-    /// How many clicks a hold of this long asks for.
-    pub fn clicks(&self, held: std::time::Duration) -> u32 {
-        let ms = held.as_millis() as u64;
-        if self.triple_ms > 0 && ms >= self.triple_ms {
-            3
-        } else if self.double_ms > 0 && ms >= self.double_ms {
-            2
-        } else {
-            1
-        }
-    }
-
-    /// Which click a hold stands at, and how far along it is to the next
-    /// one. The fill is drawn per step rather than over the whole hold, so
-    /// that the two steps are told apart by watching one thing fill twice
-    /// rather than by guessing at a fraction.
-    pub fn stage(&self, held: std::time::Duration) -> (u32, f32) {
-        let ms = held.as_millis() as f32;
-        let (double, triple) = (self.double_ms as f32, self.triple_ms as f32);
-        match self.clicks(held) {
-            1 if double > 0.0 => (1, (ms / double).clamp(0.0, 1.0)),
-            2 if triple > double => (2, ((ms - double) / (triple - double)).clamp(0.0, 1.0)),
-            n => (n, 1.0),
-        }
-    }
-
-    /// The whole hold, from press to the last step, which is what the fill
-    /// measures itself against.
-    pub fn span(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.triple_ms.max(self.double_ms))
-    }
-
-    /// How many clicks a hold can reach at all: one for the tap, and one for
-    /// each step that is switched on.
-    pub fn levels(&self) -> u32 {
-        self.clicks(std::time::Duration::from_secs(3600))
-    }
 }
 
 /// What the keys do.
@@ -345,9 +282,9 @@ pub struct Pointer {
     /// The exponential decay rate applied to velocity after every arrow key
     /// is released. A larger value leaves a shorter coast.
     pub drag: f64,
-    /// How long the anchor a gesture started on stays excluded from
-    /// attraction and snapping. This prevents a short tap from being pulled
-    /// straight back to its departure point.
+    /// How long the source anchor and anchors behind the pressed direction
+    /// stay excluded from attraction and snapping. This prevents a short tap
+    /// from being pulled backward before it can reach an anchor ahead.
     pub departure_ms: u64,
     /// The softness distance for magnetic pull. Attraction reaches full
     /// baseline strength at this distance and grows further when stretched.
@@ -494,8 +431,9 @@ pub struct Colors {
     pub armed_key_text: Hex,
     /// Around the element a further press would click.
     pub ring: Hex,
-    /// The fill that runs while a click key is held.
-    pub charge: Hex,
+    /// Accepted so the retired charge color does not invalidate old configs.
+    #[serde(rename = "charge")]
+    _legacy_charge: Option<Hex>,
     /// The dot each target wears during keyboard navigation.
     pub dot: Hex,
     /// The dot on the anchor nearest the freely moving pointer.
@@ -519,7 +457,7 @@ impl Default for Colors {
             armed_key: Hex(Color::new(0.02, 0.24, 0.15, 0.92)),
             armed_key_text: Hex(Color::new(0.55, 1.0, 0.82, 1.0)),
             ring: Hex(Color::new(0.25, 0.92, 0.63, 0.95)),
-            charge: Hex(Color::new(0.98, 0.79, 0.29, 0.95)),
+            _legacy_charge: None,
             dot: Hex(Color::new(0.91, 0.24, 0.20, 0.94)),
             nearest_dot: Hex(Color::new(0.25, 0.64, 1.0, 0.96)),
             tile: Hex(Color::new(0.08, 0.08, 0.10, 0.20)),
@@ -719,37 +657,13 @@ mod tests {
     }
 
     #[test]
-    fn a_hold_asks_for_more_clicks_the_longer_it_is() {
-        let c = Click::default();
-        let ms = std::time::Duration::from_millis;
-        assert_eq!(c.clicks(ms(0)), 1);
-        assert_eq!(c.clicks(ms(449)), 1);
-        assert_eq!(c.clicks(ms(450)), 2);
-        assert_eq!(c.clicks(ms(1099)), 2);
-        assert_eq!(c.clicks(ms(1100)), 3);
-        assert_eq!(c.clicks(ms(5000)), 3);
-        assert_eq!(c.span(), ms(1100));
-        // Each step fills on its own, and the last one sits full.
-        assert_eq!(c.stage(ms(0)), (1, 0.0));
-        assert_eq!(c.stage(ms(225)), (1, 0.5));
-        assert_eq!(c.stage(ms(450)), (2, 0.0));
-        assert_eq!(c.stage(ms(775)), (2, 0.5));
-        assert_eq!(c.stage(ms(1100)), (3, 1.0));
-        assert_eq!(c.stage(ms(9000)), (3, 1.0));
-
-        // Either step off means a hold never reaches it.
-        let single = Click {
-            double_ms: 0,
-            triple_ms: 0,
-            charge: false,
-        };
-        assert_eq!(single.clicks(ms(9000)), 1);
-        assert_eq!(single.levels(), 1);
-        assert_eq!(Click::default().levels(), 3);
-        let no_triple: Click = serde_yaml::from_str("triple_ms: 0").unwrap();
-        assert_eq!(no_triple.clicks(ms(9000)), 2);
-        assert_eq!(no_triple.span(), ms(450));
-        assert_eq!(no_triple.stage(ms(9000)), (2, 1.0));
+    fn retired_click_settings_remain_loadable_for_migration() {
+        let c: Config = serde_yaml::from_str(
+            "click:\n  double_ms: 450\n  triple_ms: 1100\n  charge: true\ncolors:\n  charge: \"#fac94af2\"\n",
+        )
+        .unwrap();
+        assert_eq!(c.keys.left(), ["minus", "return"]);
+        assert_eq!(c.keys.right(), ["equal"]);
     }
 
     #[test]

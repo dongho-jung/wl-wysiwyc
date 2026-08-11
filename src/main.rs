@@ -18,11 +18,12 @@ Usage:
   wl-wysiwyc                 interactive: hints the focused window right away,
                              or cancels an overlay that is already up.
                              Type a hint to send the pointer to it, then a
-                             click key (- or Enter) to click; hold that key
-                             to double click. Space switches to the letter
-                             grid, Tab picks another window, Esc backs out.
-                             Shift keeps arrow motion straight, Alt moves
-                             freely, and Ctrl jumps between anchors
+                             click key (- or Enter) to click. Keep the click
+                             key down and move to drag, then release to drop.
+                             Space switches to the letter grid, Tab picks
+                             another window, Esc backs out.
+                             Shift jumps to the last anchor that way, Alt
+                             moves freely, and Ctrl jumps between anchors
   wl-wysiwyc --list          print the windows that would be shown
   wl-wysiwyc --elements [N]  print the clickable elements detected for
                              window N, or the focused window (debugging aid)
