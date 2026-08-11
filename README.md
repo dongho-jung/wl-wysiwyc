@@ -39,9 +39,8 @@ and releasing the key releases the button and closes the overlay. Move with
 arrows or type another label while it is held to drag there. `keys.left_click`
 takes a list, so give it as many keys as you like, and `Shift`, `Ctrl` or `Alt`
 with a click key reaches the window too. A hint's keys are where its target is.
-When collision avoidance moves a label farther away, an outlined two-tone
-dotted connector identifies its target across light and dark content. The
-keyboard is laid over the window, so on qwerty
+Labels begin at their element centers and move only as far as needed to avoid
+overlapping each other. The keyboard is laid over the window, so on qwerty
 something in the bottom-left corner is labelled `z` and something in the
 top-right `p`. Set `keys.layout` for dvorak, or for no layout at all,
 and `keys.excluded` to keep letters you would rather not reach for out

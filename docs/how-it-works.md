@@ -315,23 +315,15 @@ rather than squeezing a column of elements into the three keys above
 each other. Labels are prefix-free, so a complete label is never the
 start of another one.
 
-Each key narrows the visible hints. Labels sit at the top-left corner of
-their element, vimium style, unless the element is small enough for the
-label to swallow it, in which case the label goes beside it: a row of
-icons is unusable when every icon is under a label. Beside is not enough
-on its own, since the icon next door is worth seeing too, so of the
-places that clear the labels already put down, the one covering the
-least of everything else wins. Labels are also a little transparent, so
-whatever a label does end up on is still recognisable. Only the element
-about to be clicked is outlined, since ringing every candidate turns a
-dense corner of a window into a mess of boxes.
-
-Collision avoidance can leave a small element and its label far apart. A
-dotted connector then runs from the element center to the label edge. Its
-dots alternate the configured label or ring color with its RGB complement,
-and each has a light or dark opposing rim. A transparent Wayland surface
-cannot sample the window pixels underneath, so carrying both contrasts is
-what keeps the connector readable across light and dark content.
+Each key narrows the visible hints. Every label starts centered on its
+element. Placement searches outward in half-label steps and takes the nearest
+position that keeps `label.gap` clearance from labels already placed. Every
+hint participates even while a prefix hides some of them, so labels do not
+jump as keys are typed. A dense cluster with no clear nearby position uses the
+candidate with the least actual overlap, then the shortest distance. Labels
+are also a little transparent, so the element under one remains recognisable.
+Only the element about to be clicked is outlined, since ringing every
+candidate turns a dense corner of a window into a mess of boxes.
 
 ### Grid mode
 

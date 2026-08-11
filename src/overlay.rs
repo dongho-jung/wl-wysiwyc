@@ -61,7 +61,6 @@ const MOTION_FRAME: Duration = Duration::from_millis(8);
 const EDGE_SCROLL_INTERVAL: Duration = Duration::from_millis(90);
 const EDGE_INSET: f64 = 3.0;
 const INITIAL_THRUST: f64 = 0.32;
-const LABEL_CONNECTOR_MIN: f32 = 12.0;
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -2908,6 +2907,7 @@ fn draw_nearest_anchor_mark(canvas: &mut Canvas, cx: f32, cy: f32, scale: i32) {
 
 /// Where a label sits on screen: buffer pixels, already clamped to the
 /// canvas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LabelBox {
     x: i32,
     y: i32,
@@ -2940,116 +2940,73 @@ impl LabelBox {
     }
 }
 
-/// Join a detached label to the center of its element. Labels that still
-/// overlap their element already identify it directly, and short gaps do not
-/// need another mark competing with the page underneath.
-fn label_connector(
-    element: Rect,
-    label: Rect,
-    min_length: f32,
-) -> Option<((f32, f32), (f32, f32))> {
-    let overlaps = element.x < label.x + label.w
-        && label.x < element.x + element.w
-        && element.y < label.y + label.h
-        && label.y < element.y + element.h;
-    if overlaps {
-        return None;
-    }
+/// Keep a label as close to its element center as possible. The search uses
+/// half-label steps so a small collision moves a label only as far as needed.
+/// If the nearby search area is completely crowded, the fallback minimizes
+/// actual overlap before distance.
+fn place_label_near(
+    center: (i32, i32),
+    size: (i32, i32),
+    taken: &[LabelBox],
+    canvas: (i32, i32),
+    gap: i32,
+) -> LabelBox {
+    const SEARCH_RINGS: i32 = 8;
 
-    let from = (element.x + element.w / 2.0, element.y + element.h / 2.0);
-    let center = (label.x + label.w / 2.0, label.y + label.h / 2.0);
-    let vector = (center.0 - from.0, center.1 - from.1);
-    let distance = vector.0.hypot(vector.1);
-    if distance <= f32::EPSILON {
-        return None;
-    }
-    // Walk back from the label center until the segment reaches its near
-    // edge. The chip itself hides everything after that point.
-    let across_x = if vector.0.abs() > f32::EPSILON {
-        label.w / 2.0 / vector.0.abs()
-    } else {
-        f32::INFINITY
+    let (bw, bh) = size;
+    let origin = (center.0 - bw / 2, center.1 - bh / 2);
+    let fit = |(x, y): (i32, i32)| LabelBox {
+        x: x.clamp(0, (canvas.0 - bw).max(0)),
+        y: y.clamp(0, (canvas.1 - bh).max(0)),
+        w: bw,
+        h: bh,
     };
-    let across_y = if vector.1.abs() > f32::EPSILON {
-        label.h / 2.0 / vector.1.abs()
-    } else {
-        f32::INFINITY
+    let step = (((bw + gap + 1) / 2).max(1), ((bh + gap + 1) / 2).max(1));
+    let mut candidates = Vec::with_capacity(((SEARCH_RINGS * 2 + 1).pow(2)) as usize);
+    for gy in -SEARCH_RINGS..=SEARCH_RINGS {
+        for gx in -SEARCH_RINGS..=SEARCH_RINGS {
+            candidates.push(fit((origin.0 + gx * step.0, origin.1 + gy * step.1)));
+        }
+    }
+    // Clamping creates duplicate candidates near screen edges. Remove them
+    // before measuring distance and checking collisions.
+    candidates.sort_unstable_by_key(|b| (b.x, b.y));
+    candidates.dedup_by_key(|b| (b.x, b.y));
+    let distance = |b: &LabelBox| {
+        let dx = (b.x + b.w / 2 - center.0) as i64;
+        let dy = (b.y + b.h / 2 - center.1) as i64;
+        dx * dx + dy * dy
     };
-    let hidden = across_x.min(across_y).clamp(0.0, 1.0);
-    let to = (
-        from.0 + vector.0 * (1.0 - hidden),
-        from.1 + vector.1 * (1.0 - hidden),
-    );
-    ((to.0 - from.0).hypot(to.1 - from.1) >= min_length).then_some((from, to))
-}
+    candidates.sort_by_key(&distance);
 
-/// The opposite RGB color, used beside the configured connector color so one
-/// of each adjacent pair remains distinct from most page backgrounds.
-fn connector_complement(color: Color) -> Color {
-    Color::new(1.0 - color.r, 1.0 - color.g, 1.0 - color.b, color.a)
-}
+    if let Some(clear) = candidates
+        .iter()
+        .find(|candidate| !taken.iter().any(|label| label.crowds(candidate, gap)))
+    {
+        return *clear;
+    }
 
-/// A light or dark rim chosen against the dot itself. The overlay cannot read
-/// pixels from the window below its transparent surface, so each dot carries
-/// both sides of the contrast instead of guessing at the page color.
-fn connector_outline(color: Color) -> Color {
-    let luma = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
-    let alpha = color.a * 0.68;
-    match luma > 0.55 {
-        true => Color::new(0.01, 0.01, 0.02, alpha),
-        false => Color::new(1.0, 1.0, 1.0, alpha),
-    }
-}
-
-/// A two-tone dotted line. Alternating complementary fills and opposite
-/// light/dark rims keep it legible across mixed light and dark content.
-fn draw_dotted_connector(
-    canvas: &mut Canvas,
-    from: (f32, f32),
-    to: (f32, f32),
-    base: Color,
-    scale: f32,
-) {
-    let vector = (to.0 - from.0, to.1 - from.1);
-    let distance = vector.0.hypot(vector.1);
-    if distance <= f32::EPSILON {
-        return;
-    }
-    let count = (distance / (5.5 * scale)).floor().max(1.0) as usize;
-    let pair = [base, connector_complement(base)];
-    let outer_radius = 1.35 * scale;
-    let inner_radius = 0.78 * scale;
-    for i in 0..=count {
-        let t = i as f32 / count as f32;
-        let center = (from.0 + vector.0 * t, from.1 + vector.1 * t);
-        let fill = pair[i % pair.len()];
-        let outer = Rect::new(
-            center.0 - outer_radius,
-            center.1 - outer_radius,
-            outer_radius * 2.0,
-            outer_radius * 2.0,
-        );
-        let inner = Rect::new(
-            center.0 - inner_radius,
-            center.1 - inner_radius,
-            inner_radius * 2.0,
-            inner_radius * 2.0,
-        );
-        canvas.round_rect(outer, outer_radius, connector_outline(fill));
-        canvas.round_rect(inner, inner_radius, fill.fade(0.82));
-    }
+    candidates
+        .into_iter()
+        .min_by_key(|candidate| {
+            let overlap: i64 = taken
+                .iter()
+                .map(|label| candidate.covers((label.x, label.y, label.w, label.h)))
+                .sum();
+            let crowded = taken
+                .iter()
+                .filter(|label| label.crowds(candidate, gap))
+                .count();
+            (overlap, crowded, distance(candidate))
+        })
+        .unwrap_or_else(|| fit(origin))
 }
 
 /// Lay out one box per hint.
 ///
-/// A label large enough to swallow its target goes beside it instead of over
-/// it: a row of small icons is unusable when every icon is under a label.
-/// Beside is not enough on its own though, since the icon next door is just
-/// as worth seeing, so of the places that clear the labels already put down,
-/// the one covering the least of everything else wins. Bigger elements keep
-/// the vimium placement, a corner of the element, which costs them nothing.
-/// Placement covers every hint, not just the visible ones, so labels stay put
-/// while a prefix is typed.
+/// Every label starts at its element center, then moves the shortest available
+/// distance needed to clear labels already placed. Placement covers every
+/// hint, not just the visible ones, so labels stay put while a prefix is typed.
 fn place_labels(
     hints: &[Hint],
     font: &Font,
@@ -3061,7 +3018,7 @@ fn place_labels(
     let px = cfg.size * scale as f32;
     let pad_x = (cfg.pad_x * scale as f32) as i32;
     let pad_y = (cfg.pad_y * scale as f32) as i32;
-    let gap = (cfg.gap * scale as f32) as i32;
+    let gap = ((cfg.gap * scale as f32) as i32).max(0);
     let rect_of = |h: &Hint| {
         (
             ((h.rx - mon.0 as f64) * scale as f64) as i32,
@@ -3070,7 +3027,6 @@ fn place_labels(
             (h.rh * scale as f64) as i32,
         )
     };
-    let elements: Vec<(i32, i32, i32, i32)> = hints.iter().map(rect_of).collect();
     let mut taken: Vec<LabelBox> = Vec::with_capacity(hints.len());
     for h in hints {
         let (ex, ey, ew, eh) = rect_of(h);
@@ -3080,66 +3036,9 @@ fn place_labels(
         let bw = (label_width(font, &h.label.to_ascii_uppercase(), px, scale as f32) as i32
             + 2 * pad_x)
             .max(bh);
-        let (mid_x, mid_y) = (ex + (ew - bw) / 2, ey + (eh - bh) / 2);
-        let small = ew < 2 * bw || eh < 2 * bh;
-        let spots = if small {
-            // Small target: everything here clears it.
-            [
-                (ex + ew + gap, mid_y),
-                (ex - bw - gap, mid_y),
-                (mid_x, ey - bh - gap),
-                (mid_x, ey + eh + gap),
-                (ex + ew + gap, ey - bh - gap),
-                (ex - bw - gap, ey + eh + gap),
-            ]
-        } else {
-            [
-                (ex, ey - bh / 2),
-                (ex + ew - bw, ey - bh / 2),
-                (ex, ey + eh - bh / 2),
-                (ex + ew - bw, ey + eh - bh / 2),
-                (ex - bw - gap, mid_y),
-                (ex + ew + gap, mid_y),
-            ]
-        };
-        let fit = |(x, y): (i32, i32)| LabelBox {
-            x: x.clamp(0, (canvas.0 - bw).max(0)),
-            y: y.clamp(0, (canvas.1 - bh).max(0)),
-            w: bw,
-            h: bh,
-        };
-        // Anything on top of a label already placed is out; among the rest,
-        // take whichever hides the least of the window.
-        let mut best: Option<(i64, LabelBox)> = None;
-        for spot in spots {
-            let b = fit(spot);
-            if taken.iter().any(|t| t.crowds(&b, gap)) {
-                continue;
-            }
-            let hidden: i64 = elements.iter().map(|&e| b.covers(e)).sum();
-            if best.as_ref().is_none_or(|(worst, _)| hidden < *worst) {
-                best = Some((hidden, b));
-            }
-            if hidden == 0 {
-                break;
-            }
-        }
-        // Nothing clear anywhere: take whichever spot hides the least of the
-        // labels already down. The first spot was the old answer, and it can
-        // land squarely on a neighbour, which reads as a target with no hint
-        // at all rather than as two labels sharing a corner.
-        let fallback = || {
-            spots
-                .iter()
-                .map(|&s| fit(s))
-                .min_by_key(|b| {
-                    let over: i64 = taken.iter().map(|t| b.covers((t.x, t.y, t.w, t.h))).sum();
-                    let hidden: i64 = elements.iter().map(|&e| b.covers(e)).sum();
-                    (over, hidden)
-                })
-                .unwrap_or_else(|| fit(spots[0]))
-        };
-        taken.push(best.map(|(_, b)| b).unwrap_or_else(fallback));
+        let center = (ex + ew / 2, ey + eh / 2);
+        let placed = place_label_near(center, (bw, bh), &taken, canvas, gap);
+        taken.push(placed);
     }
     taken
 }
@@ -3250,29 +3149,6 @@ fn draw_pick_hint(
         return;
     }
     let boxes = place_labels(hints, font, (mon.x, mon.y), (canvas.w, canvas.h), scale);
-    // Collision avoidance can put a label far enough from a small element
-    // that their ownership is no longer obvious. Connect only those detached
-    // pairs, beneath the labels and any selected-element outline.
-    for (i, (h, b)) in hints.iter().zip(&boxes).enumerate() {
-        if !h.label.starts_with(typed) {
-            continue;
-        }
-        let element = Rect::new(
-            ((h.rx - mon.x as f64) * scale as f64) as f32,
-            ((h.ry - mon.y as f64) * scale as f64) as f32,
-            (h.rw * scale as f64) as f32,
-            (h.rh * scale as f64) as f32,
-        );
-        let Some((from, to)) = label_connector(element, b.rect(), LABEL_CONNECTOR_MIN * s) else {
-            continue;
-        };
-        let hot = picked == Some(i) || preview.as_deref().is_some_and(|p| h.label.starts_with(p));
-        let color = match hot {
-            true => lit(*config::get().colors.ring),
-            false => lit(*config::get().colors.hint),
-        };
-        draw_dotted_connector(canvas, from, to, color, s);
-    }
     // What the armed key keeps is drawn last so nothing can cover it.
     for pass_hot in [false, true] {
         for (i, (h, b)) in hints.iter().zip(&boxes).enumerate() {
@@ -3692,9 +3568,9 @@ wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerV1);
 #[cfg(test)]
 mod tests {
     use super::{
-        arrow_direction, config, connector_complement, connector_outline, constrain_to_window,
-        label_connector, mode_of, pull, pull_to_end, Arrow, ArrowKeys, ButtonEdge, ButtonInput,
-        Color, Drift, Drill, Key, Modifiers, NavMode, Rect, BTN_LEFT, BTN_RIGHT,
+        arrow_direction, config, constrain_to_window, mode_of, place_label_near, pull, pull_to_end,
+        Arrow, ArrowKeys, ButtonEdge, ButtonInput, Drift, Drill, Key, LabelBox, Modifiers, NavMode,
+        Rect, BTN_LEFT, BTN_RIGHT,
     };
     use std::time::{Duration, Instant};
 
@@ -3995,33 +3871,49 @@ mod tests {
     }
 
     #[test]
-    fn only_detached_labels_get_connectors() {
-        let element = Rect::new(10.0, 10.0, 10.0, 10.0);
-        let touching = Rect::new(25.0, 10.0, 10.0, 10.0);
-        let overlapping = Rect::new(18.0, 10.0, 10.0, 10.0);
-        let detached = Rect::new(40.0, 10.0, 10.0, 10.0);
-
-        assert!(label_connector(element, touching, 12.0).is_none());
-        assert!(label_connector(element, overlapping, 12.0).is_none());
+    fn labels_start_centered_and_move_only_to_avoid_each_other() {
+        let first = place_label_near((100, 100), (20, 10), &[], (200, 200), 3);
         assert_eq!(
-            label_connector(element, detached, 12.0),
-            Some(((15.0, 15.0), (40.0, 15.0)))
+            first,
+            LabelBox {
+                x: 90,
+                y: 95,
+                w: 20,
+                h: 10,
+            }
         );
+
+        let second = place_label_near((100, 100), (20, 10), &[first], (200, 200), 3);
+        assert!(!first.crowds(&second, 3));
+        let dx = second.x + second.w / 2 - 100;
+        let dy = second.y + second.h / 2 - 100;
+        assert!(dx * dx + dy * dy <= 24 * 24, "label moved too far");
+
+        let edge = place_label_near((2, 2), (20, 10), &[], (200, 200), 3);
+        assert_eq!((edge.x, edge.y), (0, 0));
     }
 
     #[test]
-    fn connector_dots_pair_complements_with_opposite_rims() {
-        let base = Color::new(0.98, 0.79, 0.29, 0.88);
-        let complement = connector_complement(base);
-        assert!((base.r + complement.r - 1.0).abs() < f32::EPSILON);
-        assert!((base.g + complement.g - 1.0).abs() < f32::EPSILON);
-        assert!((base.b + complement.b - 1.0).abs() < f32::EPSILON);
-        assert_eq!(base.a, complement.a);
-
-        let bright_rim = connector_outline(base);
-        let dark_rim = connector_outline(complement);
-        assert!(bright_rim.r < 0.1 && bright_rim.g < 0.1 && bright_rim.b < 0.1);
-        assert!(dark_rim.r > 0.9 && dark_rim.g > 0.9 && dark_rim.b > 0.9);
+    fn a_dense_label_cluster_spreads_nearby_without_overlap() {
+        let mut placed = Vec::new();
+        for _ in 0..25 {
+            let next = place_label_near((100, 100), (20, 10), &placed, (200, 200), 3);
+            assert!(
+                placed.iter().all(|label| !label.crowds(&next, 3)),
+                "dense placement overlapped an existing label"
+            );
+            placed.push(next);
+        }
+        let furthest = placed
+            .iter()
+            .map(|label| {
+                let dx = label.x + label.w / 2 - 100;
+                let dy = label.y + label.h / 2 - 100;
+                dx * dx + dy * dy
+            })
+            .max()
+            .unwrap();
+        assert!(furthest <= 60 * 60, "dense labels spread too far");
     }
 
     #[test]

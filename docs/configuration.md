@@ -181,10 +181,9 @@ elements:
   reachable.
 - Labels are slightly transparent on purpose, so a small icon under one
   is still recognisable. End `hint` with `ff` for solid labels.
-- Collision avoidance can leave a label detached from a small element. When
-  the visible gap is large enough, alternating configured and complementary
-  dots join the element's center to the label edge. Each dot has an opposite
-  light or dark rim, so the connector remains visible on mixed backgrounds.
+- Labels start at their element centers. When two would overlap, the later
+  one takes the nearest available position with `label.gap` clearance. If a
+  dense cluster has no clear nearby position, actual overlap is minimized.
 - `dim` is transparent by default. The labels carry themselves against
   most windows, and darkening the screen to read them is a tax on every
   glance; `#00000047` is the old look if the contrast is wanted.
