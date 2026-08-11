@@ -327,51 +327,73 @@ pub struct Pointer {
     /// deliberate distance. Zero leaves the overlay up whatever the mouse
     /// does.
     pub cancel_px: f64,
-    /// How long an arrow key has to be held before it steps a second time,
-    /// and the shortest it will wait between steps once it is going. A held
-    /// key covers ground a target at a time, quicker the longer it is held.
-    pub repeat_ms: u64,
-    pub repeat_min_ms: u64,
-    /// How far a tap of an arrow key will reach for the next target that
-    /// way, measured between the near edges of the two. Past this it does
-    /// nothing rather than throw the pointer across the window, and holding
-    /// the key flies it there instead.
-    pub reach_px: f64,
+    /// The fastest keyboard navigation may move, in pixels per second.
+    pub speed_px: f64,
+    /// How hard an arrow key pushes, in pixels per second per second. A tap
+    /// nudges the pointer and a hold builds speed up to `speed_px`.
+    pub accel_px: f64,
+    /// The small velocity guaranteed on the first frame of a fresh arrow
+    /// gesture. This lets even a short tap leave its current anchor without
+    /// sacrificing low-speed control afterward.
+    pub launch_speed_px: f64,
+    /// Constant speed used by Alt+arrow free movement. This mode has no
+    /// acceleration, inertia, attraction, or snapping.
+    pub direct_speed_px: f64,
+    /// How long a fresh arrow gesture eases from fine control to full
+    /// acceleration. Zero applies `accel_px` immediately.
+    pub ramp_ms: u64,
+    /// The exponential decay rate applied to velocity after every arrow key
+    /// is released. A larger value leaves a shorter coast.
+    pub drag: f64,
+    /// How long the anchor a gesture started on stays excluded from
+    /// attraction and snapping. This prevents a short tap from being pulled
+    /// straight back to its departure point.
+    pub departure_ms: u64,
+    /// The softness distance for magnetic pull. Attraction reaches full
+    /// baseline strength at this distance and grows further when stretched.
+    pub attract_px: f64,
+    /// How close a released pointer must get before a spring landing is
+    /// committed to the exact target.
+    pub snap_px: f64,
     /// About how long the pointer takes to reach a target. It is pulled
     /// there rather than placed, so this is the settling time of the pull,
     /// not a duration it is held to: a press while it is still moving adds
     /// to the speed it already has. Long enough to follow, short enough not
     /// to wait for.
     pub travel_ms: u64,
+    // Accepted so a config written for target-by-target navigation still
+    // loads. These no longer affect continuous navigation and can be removed
+    // from the file.
+    #[serde(rename = "repeat_ms")]
+    _legacy_repeat_ms: Option<u64>,
+    #[serde(rename = "repeat_min_ms")]
+    _legacy_repeat_min_ms: Option<u64>,
+    #[serde(rename = "reach_px")]
+    _legacy_reach_px: Option<f64>,
 }
 
 impl Default for Pointer {
     fn default() -> Self {
         Pointer {
             cancel_px: 24.0,
-            repeat_ms: 280,
-            repeat_min_ms: 70,
-            reach_px: 500.0,
+            speed_px: 1050.0,
+            accel_px: 4800.0,
+            launch_speed_px: 48.0,
+            direct_speed_px: 320.0,
+            ramp_ms: 220,
+            drag: 16.0,
+            departure_ms: 160,
+            attract_px: 80.0,
+            snap_px: 8.0,
             travel_ms: 280,
+            _legacy_repeat_ms: None,
+            _legacy_repeat_min_ms: None,
+            _legacy_reach_px: None,
         }
     }
 }
 
 impl Pointer {
-    /// How long to wait before a held key steps again.
-    pub fn repeat(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(self.repeat_ms.max(self.repeat_min_ms))
-    }
-
-    /// And how long after that, once it has stepped `n` times: each wait is
-    /// a little shorter than the last, down to the floor, so holding a key
-    /// gathers pace the way holding any key does.
-    pub fn again(&self, n: u32) -> std::time::Duration {
-        let slowest = self.repeat().as_millis() as f64;
-        let wait = slowest * 0.62_f64.powi(n as i32);
-        std::time::Duration::from_millis((wait as u64).max(self.repeat_min_ms))
-    }
-
     /// The pull on the pointer, as the rate of the spring that moves it.
     /// Set from how long a trip should take: a damped spring is settled
     /// after about four and a half of these.
@@ -384,7 +406,8 @@ impl Pointer {
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Scroll {
-    /// Wheel notches per press, the way a mouse wheel counts them.
+    /// Wheel notches per press or edge-scroll tick, the way a mouse wheel
+    /// counts them.
     pub step: u32,
     /// Notches for a press with shift, which is meant to reach the end of
     /// the document. Raise it for something longer than it gets to.
@@ -425,9 +448,9 @@ pub struct Label {
     pub gap: f32,
     /// Space between a label's own characters.
     pub track: f32,
-    /// How long after the last arrow step the labels come back. Stepping
-    /// with the arrows does not need them, and a screen of labels is a lot
-    /// to look at while what you are watching is one dot moving.
+    /// How long after keyboard navigation stops the labels come back. Motion
+    /// does not need them, and a screen of labels is a lot to look at while
+    /// what you are watching is one pointer moving.
     pub wake_ms: u64,
 }
 
@@ -473,8 +496,10 @@ pub struct Colors {
     pub ring: Hex,
     /// The fill that runs while a click key is held.
     pub charge: Hex,
-    /// The dot each target wears while the arrows are stepping between them.
+    /// The dot each target wears during keyboard navigation.
     pub dot: Hex,
+    /// The dot on the anchor nearest the freely moving pointer.
+    pub nearest_dot: Hex,
     /// Grid tiles and the outline around the hinted window.
     pub tile: Hex,
     pub tile_border: Hex,
@@ -496,6 +521,7 @@ impl Default for Colors {
             ring: Hex(Color::new(0.25, 0.92, 0.63, 0.95)),
             charge: Hex(Color::new(0.98, 0.79, 0.29, 0.95)),
             dot: Hex(Color::new(0.91, 0.24, 0.20, 0.94)),
+            nearest_dot: Hex(Color::new(0.25, 0.64, 1.0, 0.96)),
             tile: Hex(Color::new(0.08, 0.08, 0.10, 0.20)),
             tile_border: Hex(Color::new(1.0, 1.0, 1.0, 0.30)),
             text: Hex(Color::new(1.0, 1.0, 1.0, 0.96)),
@@ -594,6 +620,15 @@ mod tests {
         assert_eq!(c.keys.right(), ["equal"]);
         assert_eq!(c.keys.reset(), None);
         assert_eq!(c.keys.switch().as_deref(), Some("space"));
+        assert_eq!(c.pointer.speed_px, 1050.0);
+        assert_eq!(c.pointer.accel_px, 4800.0);
+        assert_eq!(c.pointer.launch_speed_px, 48.0);
+        assert_eq!(c.pointer.direct_speed_px, 320.0);
+        assert_eq!(c.pointer.ramp_ms, 220);
+        assert_eq!(c.pointer.drag, 16.0);
+        assert_eq!(c.pointer.departure_ms, 160);
+        assert_eq!(c.pointer.attract_px, 80.0);
+        assert_eq!(c.pointer.snap_px, 8.0);
         assert_eq!(c.label.size, 11.5);
         assert_eq!(c.elements.max, 400);
     }
@@ -610,6 +645,34 @@ mod tests {
         assert_eq!(c.label.pad_x, 4.5);
         assert!((c.colors.hint.r - 0.07).abs() < 0.01);
         assert_eq!(c.colors.armed_text.a, 1.0);
+    }
+
+    #[test]
+    fn continuous_pointer_settings_are_independent() {
+        let c: Config = serde_yaml::from_str(
+            "pointer:\n  speed_px: 800\n  accel_px: 3000\n  launch_speed_px: 36\n  direct_speed_px: 240\n  ramp_ms: 180\n  drag: 20\n  departure_ms: 120\n  attract_px: 90\n  snap_px: 12\n",
+        )
+        .unwrap();
+        assert_eq!(c.pointer.speed_px, 800.0);
+        assert_eq!(c.pointer.accel_px, 3000.0);
+        assert_eq!(c.pointer.launch_speed_px, 36.0);
+        assert_eq!(c.pointer.direct_speed_px, 240.0);
+        assert_eq!(c.pointer.ramp_ms, 180);
+        assert_eq!(c.pointer.drag, 20.0);
+        assert_eq!(c.pointer.departure_ms, 120);
+        assert_eq!(c.pointer.attract_px, 90.0);
+        assert_eq!(c.pointer.snap_px, 12.0);
+        assert_eq!(c.pointer.travel_ms, 280);
+    }
+
+    #[test]
+    fn target_step_settings_remain_loadable_for_migration() {
+        let c: Config = serde_yaml::from_str(
+            "pointer:\n  repeat_ms: 280\n  repeat_min_ms: 70\n  reach_px: 260\n",
+        )
+        .unwrap();
+        assert_eq!(c.pointer.speed_px, 1050.0);
+        assert_eq!(c.pointer.drag, 16.0);
     }
 
     #[test]

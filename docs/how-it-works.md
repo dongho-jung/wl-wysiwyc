@@ -34,12 +34,12 @@ sans:bold` with fallbacks to common system paths. Buffers are rendered
 at an integer scale of ceil(monitor scale) so text stays sharp on
 fractional-scale outputs.
 
-A frame is a whole output, fifty megabytes of it, and the pointer's
-travel is drawn one frame at a time, so three things keep a frame cheap:
-the distance measurement is only taken near a shape's edge, since the
-middle of a shape is either covered or not; glyph rasters are kept
-between frames rather than drawn again each time; and the blending is
-integer arithmetic.
+A normal frame is a whole output, about fifty megabytes on the current
+layout. The moving focus ring is therefore a separate 48-pixel logical
+subsurface. Its position can be committed without clearing, redrawing,
+or uploading the parent overlay. Static frames still stay cheap: the
+distance measurement is only taken near a shape's edge, glyph rasters
+are cached, and blending uses integer arithmetic.
 
 Startup queries the focused window's clickable elements over AT-SPI
 (1.8 s hard timeout, results cached per window). If elements are found
@@ -135,13 +135,6 @@ under a `document web` node, and the chrome around one - tabs,
 bookmarks, toolbar - is left alone, since it does not move when the
 page does.
 
-
-
-Only what is inside a document travels. The walk marks every element
-under a `document web` node, and the chrome around one - tabs,
-bookmarks, toolbar - is left alone, since it does not move when the
-page does.
-
 A wheel turned by hand does the same thing without saying so: the
 overlay takes no pointer input, so the scroll goes straight past it.
 One element inside the document is asked where it is twenty times a
@@ -177,83 +170,85 @@ The overlay opens with the target already on whatever the pointer is
 nearest, so a click can need no typing at all, and the arrow keys move
 it from there.
 
-An arrow key means two things, and which one depends on how long it is
-held. A press is worth the next target that way, nearest first and no
-further off than `pointer.reach_px`.
+Arrow keys push the pointer continuously instead of asking for another
+target. `pointer.accel_px` sets the full acceleration and `pointer.speed_px`
+caps the speed. The first frame of a fresh gesture is guaranteed the small
+`pointer.launch_speed_px` velocity, then acceleration begins at 32 percent
+and eases to all of it over `pointer.ramp_ms`. The launch is enough for a
+short tap to leave an anchor, while the ramp keeps dense layouts precise and
+long holds still reach full speed. Releasing every arrow applies
+`pointer.drag`, leaving a short coast that spends its velocity instead of
+another queued move. Any non-arrow input clears the chord immediately.
 
-Which one is "that way" is decided between boxes, not between middles.
-A page's links are left aligned and as long as their text, so the
-middle of one wanders further right the longer it is: down a list of
-certificate names the middles drift a hundred and forty pixels sideways
-over twenty rows, and a rule about middles has the bottom half of that
-list in a different column from the top half, where pressing down does
-nothing at all. Two boxes that share any of the same rows are on the
-same line, however wide either of them is, and how far apart they are
-is the gap between their near edges. What is left over sideways is what
-counts against a target: a fixed allowance for near neighbours, and a
-share of the distance for far ones, so a column four hundred pixels
-over is still to the right while something at sixty degrees is not.
-A press has to land somewhere, and a push of its own would be a nudge
-in an open stretch and three targets in a crowded one, so the press
-names the target and the pointer is pulled to it.
+Modifiers select separate movement contracts:
 
-Holding the key steps again, and again, quicker the longer it is held:
-`pointer.repeat_ms` before the second step and each wait a little
-shorter than the last down to `pointer.repeat_min_ms`. Holding is for
-covering ground, and covering it a target at a time keeps every landing
-on something.
+- `Shift+arrow` projects existing velocity onto the current input vector and
+  suppresses held-anchor steering. A one-key or two-key chord therefore stays
+  on one cardinal or diagonal line. Normal attraction resumes on release.
+- `Alt+arrow` moves at the constant `pointer.direct_speed_px`. It applies no
+  acceleration, inertia, attraction, or snap. Release leaves the pointer at
+  its exact arbitrary coordinate, while the nearest anchor remains blue as a
+  visual reference.
+- `Ctrl+arrow` does no travel animation. It chooses the next anchor in the
+  requested visual row or column and sends the pointer there in one frame.
+  The binding does not repeat while held, so one physical press means one
+  anchor jump. When no anchor remains that way, the same press scrolls on
+  that axis.
 
-A held key keeps to the run it is walking. It reaches a third as far as
-a press does and will not carry on in reading order, so it walks a list
-to the end of the list and stops. A press will do both of those things,
-which is how you leave the list. Without that, holding down a column of
-twenty certificate names runs off the end, leaps to whatever section
-comes next, and carries on there: a key that has taken on a life of its
-own, and the thing that made holding one feel broken.
+All arrows currently down are combined before motion is integrated.
+Two perpendicular keys produce one normalized diagonal vector, so a
+diagonal is no faster than a cardinal direction. Releases update their own
+keys, so releasing right from a right-down chord continues downward instead
+of stopping or leaving a hidden horizontal queue.
 
-It was a push once, with the pointer let off its leash while the key
-was down and caught by whatever it ended up near. That reads as the key
-still being held after it has been let go: the pointer carries on for a
-fifth of a second and lands somewhere nobody chose. Stepping does not
-have the problem, because there is nothing to carry on with.
+Hyprland shadows ordinary Lua binds when another key in a chord is pressed.
+Arrow binds are marked transparent so both release edges still reach the
+global-shortcut client. Continuous modes also repeat while physically held.
+The first press gets a lease long enough to reach the compositor's repeat
+delay; after repeats begin, every pulse renews a 120ms lease. If a compositor
+still drops every release edge, stopped repeats expire the direction instead
+of letting it accelerate to a screen edge. Ctrl's instant mode does not
+repeat.
 
-A press with nothing beyond `reach_px` does nothing at all, which at
-the end of a row or the bottom of a column is the honest answer: every
-layout has edges, and answering "the next one down" with a leap across
-the window is worse than answering it with nothing.
+When every arrow is released, drag first gives a projected coast endpoint.
+The anchor nearest that endpoint becomes the magnetic target. Using the
+endpoint rather than the pre-coast position preserves the direction of
+inertia near the midpoint between two anchors. The target is selected from
+all eligible anchors, with no distance cutoff, so released motion cannot
+stop in empty space. The anchor where the gesture started is temporarily
+ineligible for `pointer.departure_ms`. This keeps even a one-frame tap from
+being recaptured before it can move toward a neighboring anchor. If it is the
+only anchor, it becomes eligible again when the grace period expires.
 
-While the arrows are stepping the labels give way to a dot on each
-target, the one being stepped between lit up and the rest in
-`colors.dot`, and a ring around the pointer itself as it slides from
-one to the next. What is being watched is one thing moving, and a
-screen of labels is a lot to look through to see it. Typing brings them
-straight back, and so does `label.wake_ms` of not stepping.
+`pointer.attract_px` is the softness distance for that pull. The released
+pointer behaves like a stretched spring: force grows with distance beyond
+that radius, up to a bounded maximum, instead of flattening out. A distant
+target therefore accelerates the pointer quickly across empty space. While
+an arrow is still held, its direct acceleration stays in control and only a
+weaker local pull can bend the path.
 
-The pointer is pulled to each target by a spring damped a little under
-the point where it would stop dead, so a step leans into the target,
-arrives a hair past it and settles: it starts from nothing, gets going,
-and eases off, rather than appearing at the other end. `travel_ms` sets
-how long that takes.
+Inside `pointer.snap_px`, a released pointer is caught by a slightly
+under-damped spring and lands exactly on the anchor. It can arrive a little
+past and settle back first, which gives the landing its tension instead of
+making it stop dead.
 
-A held key pulls harder than that, as hard as it needs to arrive before
-the next step is due. A step worth watching takes longer than the
-seventy milliseconds between steps at the end of a hold, and a pointer
-that cannot keep up falls further behind with every one: letting go then
-leaves it several targets adrift, walking the focus through all of them
-on its way to the last. The pull follows the cadence, so the pointer is
-where the key left it. With the labels down there is little enough on
-screen to draw every step of the journey, seven to sixteen milliseconds
-a frame against thirty to forty-five with them up, which is what makes a
-journey of two hundred milliseconds something you can watch rather than
-two states swapping.
+The departure grace applies to held steering, release attraction, and snap.
+After it expires, the original anchor participates like every other anchor.
 
-Two things stop a flight that will not stop itself. It cannot pass the
-edge of the screen: running off one leaves the pointer parked against
-it while the number behind it runs away, and flying back then does
-nothing until all of that has been undone. And a key held for longer
-than it takes to cross a screen, or any other key being pressed, ends
-the push: both mean a release that never arrived, and the pointer
-should stop rather than sail on.
+The normal label frame and a compact frame of small red anchor dots are
+rendered before movement. The first arrow swaps the cached dot buffer onto
+the parent surface. The nearest anchor is covered by a blue dot on one small
+subsurface, and the focus ring moves on another.
+Pointer requests are flushed without a Wayland round trip, and the
+output-sized parent is not repainted during motion. The labels return after
+motion stops and `label.wake_ms` expires.
+The pointer cannot pass the active window edge while an arrow is pushing it.
+Velocity into that edge is discarded rather than stored up, and wheel events
+are sent on the matching axis at a bounded rate. A diagonal at a corner can
+scroll both axes. Hint refresh waits until held motion and any magnetic
+landing finish, then keeps an Alt-positioned pointer at its exact coordinate
+instead of pulling it to the refreshed anchors. The outer screen edge remains
+a final clamp for named travel and other pointer motion.
 
 Typing a hint is the other way in: that names a target outright, and
 the pointer is pulled straight there at `pointer.travel_ms` without
@@ -434,9 +429,10 @@ the counts above are what it settles on.
 
 ## Click
 
-The chosen point (tile center or element center) is recorded in global
-logical coordinates, the overlay is torn down (so the click cannot land
-on the overlay itself), and the click is injected through
+The chosen point is an element or tile center when named or magnetically
+snapped. A click taken while an arrow is still moving uses the ring's live
+coordinate. The point is recorded in global logical coordinates. The overlay
+is torn down, so the click cannot land on it, and the click is injected through
 `zwlr_virtual_pointer_v1`: absolute motion scaled to the output layout
 extent, then a left button press and release.
 
@@ -472,27 +468,32 @@ extent, then a left button press and release.
   submap presses it with, one line each. What a config did to the keys,
   without opening the overlay to find out.
 - `--drill SCRIPT [N]` presses its own keys on the overlay and says
-  where the pointer went: `--drill "down:60 wait:300 down:60" 2` taps
-  down twice on window 2 and prints what each press landed on and how
-  far it moved. It takes no keyboard and binds no submap, and clicks
-  nothing. `tests/navigation.html` is a page built to be hard for it:
-  a dense chrome row, a sidebar, cards, a form, running text with
-  links in it, a wide table, wrapped chips, a cluster of tiny icons,
-  overlapping boxes, and targets spread far apart. Open it in a browser
-  and drill against it; every press should move by one target, and the
-  numbers say whether it did:
+  where the pointer went. Chords use `+`, so
+  `--drill "down+right:300 wait:700 left:60" 2` holds a diagonal,
+  waits for its coast to finish, then taps left. It takes no keyboard,
+  binds no submap, and clicks nothing. The pages under `tests/nav/`
+  provide columns, rows, sparse anchors, forms, and prose for checking
+  free motion and magnetic capture against different layouts:
 
   ```
-  page sidebar, 5 taps down     34px 34px 34px 34px 34px
-  icon grid, 4 taps right       44px 44px 45px 46px
-  right at the window edge      0px SAME 0px SAME
+  wl-wysiwyc --drill "down+right:300 wait:700" 2
+  WL_TRACE=1 wl-wysiwyc --drill "right:60 wait:500" 2
   ```
+
+  Modifier modes use `straight-right`, `free-right`, or `instant-right`
+  (and the other directions) in a drill script.
 
   `WL_TRACE=1` adds a line per frame of the pointer's own motion, and
-  `WL_KEYS=1` a line per key the compositor delivers and per step taken.
-  Between them they answer where a movement came from, which is how a
-  hold that would not stop was pinned on the steps rather than on the
-  keys: the release arrives when it should.
+  `WL_KEYS=1` a line per key edge the compositor delivers. Between them
+  they show whether movement came from live thrust, release inertia,
+  attraction, or a snapped target.
+- `python3 tests/nav/measure.py` builds a test-only Wayland virtual keyboard,
+  opens every page under `tests/nav/`, and checks taps, long holds, diagonals,
+  both release orders, opposite keys, rolling turns, and rapid taps through
+  the real Hyprland submap and global-shortcut path. Per-run traces are kept
+  under `target/nav-measure/`. It needs Chromium, a running Hyprland session,
+  `wayland-scanner`, a C compiler, pkg-config, and the Wayland and xkbcommon
+  development packages.
 - `--move-test X Y` moves the cursor to global (X, Y) through the
   virtual pointer without clicking. Verifies coordinate mapping.
 

@@ -91,13 +91,13 @@ const APP: &str = "wl-wysiwyc";
 /// appends a second copy of every bind, and a key bound twice would take a
 /// hint the moment it is shown. Changing which keys the overlay wants
 /// therefore means a new submap rather than a redefinition of this one.
-fn submap_name(keys: &[(String, String)]) -> String {
+fn submap_name(keys: &[(String, String, bool, bool)]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     let joined: Vec<String> = keys
         .iter()
-        .map(|(id, bind)| format!("{id}={bind}"))
+        .map(|(id, bind, repeat, transparent)| format!("{id}={bind}:{repeat}:{transparent}"))
         .collect();
-    for byte in joined.join(" ").bytes() {
+    for byte in format!("modifier-navigation-v3 {}", joined.join(" ")).bytes() {
         h ^= byte as u64;
         h = h.wrapping_mul(0x100_0000_01b3);
     }
@@ -118,13 +118,34 @@ fn submap_defined(name: &str) -> bool {
     hyprctl(&["binds"]).is_ok_and(|b| b.contains(&format!("submap: {name}")))
 }
 
+fn lua_bind_options(repeat: bool, transparent: bool) -> &'static str {
+    match (repeat, transparent) {
+        (false, false) => "",
+        (true, false) => ", { repeating = true }",
+        (false, true) => ", { transparent = true }",
+        (true, true) => ", { repeating = true, transparent = true }",
+    }
+}
+
+fn legacy_bind_directive(repeat: bool, transparent: bool) -> &'static str {
+    match (repeat, transparent) {
+        (false, false) => "bind",
+        (true, false) => "binde",
+        (false, true) => "bindt",
+        (true, true) => "bindet",
+    }
+}
+
 /// Define the submap that turns each key into a global shortcut. Hyprland
 /// takes config either as Lua or in its own language depending on how it was
 /// set up, and only one of the two answers to a given call, so try both.
-fn define_submap(name: &str, keys: &[(String, String)]) -> Result<(), Box<dyn Error>> {
+fn define_submap(name: &str, keys: &[(String, String, bool, bool)]) -> Result<(), Box<dyn Error>> {
     let mut lua_binds: String = keys
         .iter()
-        .map(|(id, bind)| format!("hl.bind(\"{bind}\", hl.dsp.global(\"{APP}:{id}\")) "))
+        .map(|(id, bind, repeat, transparent)| {
+            let options = lua_bind_options(*repeat, *transparent);
+            format!("hl.bind(\"{bind}\", hl.dsp.global(\"{APP}:{id}\"){options}) ")
+        })
         .collect();
     // A way out that does not depend on this process being alive to answer.
     // Every other key in the submap dispatches to it, so if it wedges or is
@@ -136,14 +157,17 @@ fn define_submap(name: &str, keys: &[(String, String)]) -> Result<(), Box<dyn Er
         return Ok(());
     }
     let mut batch = format!("keyword submap {name} ; ");
-    for (id, bind) in keys {
+    for (id, bind, repeat, transparent) in keys {
         // The legacy syntax wants the modifiers in one field of their own,
         // space separated, and the key in the next.
         let (mods, key) = match bind.rsplit_once('+') {
             Some((m, k)) => (m.replace('+', " ").trim().to_string(), k.trim().to_string()),
             None => (String::new(), bind.clone()),
         };
-        batch.push_str(&format!("keyword bind {mods},{key},global,{APP}:{id} ; "));
+        let directive = legacy_bind_directive(*repeat, *transparent);
+        batch.push_str(&format!(
+            "keyword {directive} {mods},{key},global,{APP}:{id} ; "
+        ));
     }
     batch.push_str("keyword bind CTRL,escape,submap,reset ; ");
     batch.push_str("keyword submap reset");
@@ -153,7 +177,7 @@ fn define_submap(name: &str, keys: &[(String, String)]) -> Result<(), Box<dyn Er
 
 /// Send the compositor into the overlay's submap, defining it first if this
 /// is the first run since Hyprland started.
-pub fn enter_submap(keys: &[(String, String)]) -> Result<(), Box<dyn Error>> {
+pub fn enter_submap(keys: &[(String, String, bool, bool)]) -> Result<(), Box<dyn Error>> {
     let name = submap_name(keys);
     if !submap_defined(&name) {
         define_submap(&name, keys)?;
@@ -316,4 +340,24 @@ pub fn snapshot() -> Result<Snapshot, Box<dyn Error>> {
         windows,
         layout_extent: extent,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{legacy_bind_directive, lua_bind_options};
+
+    #[test]
+    fn moving_arrows_repeat_and_cannot_be_shadowed() {
+        assert_eq!(legacy_bind_directive(true, true), "bindet");
+        assert_eq!(
+            lua_bind_options(true, true),
+            ", { repeating = true, transparent = true }"
+        );
+    }
+
+    #[test]
+    fn instant_arrows_are_transparent_but_do_not_repeat() {
+        assert_eq!(legacy_bind_directive(false, true), "bindt");
+        assert_eq!(lua_bind_options(false, true), ", { transparent = true }");
+    }
 }

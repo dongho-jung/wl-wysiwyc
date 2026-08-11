@@ -7,13 +7,13 @@ use crate::hypr::{self, Snapshot};
 use crate::shortcuts::{
     protocol::hyprland_global_shortcut_v1::{self, HyprlandGlobalShortcutV1},
     protocol::hyprland_global_shortcuts_manager_v1::HyprlandGlobalShortcutsManagerV1,
-    Key, Shortcuts, Wheel,
+    Arrow, Key, NavMode, Shortcuts, Wheel,
 };
 use fontdue::Font;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_keyboard, delegate_layer, delegate_output, delegate_registry,
-    delegate_seat, delegate_shm,
+    delegate_seat, delegate_shm, delegate_subcompositor,
     output::{OutputHandler, OutputState},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -28,9 +28,13 @@ use smithay_client_toolkit::{
         },
         WaylandSurface,
     },
-    shm::{slot::SlotPool, Shm, ShmHandler},
+    shm::{
+        slot::{Buffer, SlotPool},
+        Shm, ShmHandler,
+    },
+    subcompositor::SubcompositorState,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::error::Error;
 use std::io::ErrorKind;
 use std::time::{Duration, Instant};
@@ -38,7 +42,8 @@ use wayland_client::{
     backend::WaylandError,
     globals::{registry_queue_init, GlobalListContents},
     protocol::{
-        wl_keyboard, wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm, wl_surface,
+        wl_keyboard, wl_output, wl_pointer, wl_region, wl_registry, wl_seat, wl_shm, wl_subsurface,
+        wl_surface,
     },
     Connection, Dispatch, QueueHandle,
 };
@@ -50,6 +55,12 @@ use wayland_protocols_wlr::virtual_pointer::v1::client::{
 /// How near the pointer has to get before what it is heading for counts as
 /// having caught it, in global logical pixels.
 const CAUGHT: f64 = 22.0;
+const POINTER_SURFACE_SIZE: i32 = 48;
+const ANCHOR_SURFACE_SIZE: i32 = 32;
+const MOTION_FRAME: Duration = Duration::from_millis(8);
+const EDGE_SCROLL_INTERVAL: Duration = Duration::from_millis(90);
+const EDGE_INSET: f64 = 3.0;
+const INITIAL_THRUST: f64 = 0.32;
 
 const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
@@ -103,44 +114,59 @@ pub struct Smoke {
 /// over the real labels of a real window and says where the pointer went, so
 /// that tuning any of it is measuring rather than guessing.
 pub struct Drill {
-    /// What to press, how long to hold it, in order.
-    pub steps: Vec<(Key, Duration)>,
+    /// What to press together, how long to hold the chord, in order.
+    pub steps: Vec<(Vec<Key>, Duration)>,
     /// Which window to run it on, 1-based, or the focused one.
     pub win: Option<usize>,
 }
 
 impl Drill {
-    /// `down:70 wait:400 q:60` and so on: a key and how long it is held, or
-    /// a wait with nothing held. Bare names hold for 70ms.
+    /// `down:70 down+right:250 wait:400` and so on: a chord and how long it
+    /// is held, or a wait with nothing held. Bare names hold for 70ms.
     pub fn parse(script: &str) -> Result<Drill, String> {
+        let key = |name: &str| match name {
+            "left" => Ok(Key::Arrow(Arrow::Left, NavMode::Normal)),
+            "right" => Ok(Key::Arrow(Arrow::Right, NavMode::Normal)),
+            "up" => Ok(Key::Arrow(Arrow::Up, NavMode::Normal)),
+            "down" => Ok(Key::Arrow(Arrow::Down, NavMode::Normal)),
+            "straight-left" | "shift-left" => Ok(Key::Arrow(Arrow::Left, NavMode::Straight)),
+            "straight-right" | "shift-right" => Ok(Key::Arrow(Arrow::Right, NavMode::Straight)),
+            "straight-up" | "shift-up" => Ok(Key::Arrow(Arrow::Up, NavMode::Straight)),
+            "straight-down" | "shift-down" => Ok(Key::Arrow(Arrow::Down, NavMode::Straight)),
+            "free-left" | "alt-left" => Ok(Key::Arrow(Arrow::Left, NavMode::Free)),
+            "free-right" | "alt-right" => Ok(Key::Arrow(Arrow::Right, NavMode::Free)),
+            "free-up" | "alt-up" => Ok(Key::Arrow(Arrow::Up, NavMode::Free)),
+            "free-down" | "alt-down" => Ok(Key::Arrow(Arrow::Down, NavMode::Free)),
+            "instant-left" | "ctrl-left" => Ok(Key::Arrow(Arrow::Left, NavMode::Instant)),
+            "instant-right" | "ctrl-right" => Ok(Key::Arrow(Arrow::Right, NavMode::Instant)),
+            "instant-up" | "ctrl-up" => Ok(Key::Arrow(Arrow::Up, NavMode::Instant)),
+            "instant-down" | "ctrl-down" => Ok(Key::Arrow(Arrow::Down, NavMode::Instant)),
+            "esc" | "escape" => Ok(Key::Escape),
+            "tab" => Ok(Key::Tab),
+            "space" => Ok(Key::Char(' ')),
+            "scrollup" => Ok(Key::Scroll(Wheel {
+                back: true,
+                far: false,
+                across: false,
+            })),
+            "scrolldown" => Ok(Key::Scroll(Wheel {
+                back: false,
+                far: false,
+                across: false,
+            })),
+            "click" => Ok(Key::LeftClick),
+            one if one.chars().count() == 1 => Ok(Key::Char(one.chars().next().unwrap())),
+            other => Err(format!("{other}: not a key")),
+        };
         let mut steps = Vec::new();
         for word in script.split([' ', ',']).filter(|w| !w.is_empty()) {
             let (name, ms) = word.split_once(':').unwrap_or((word, "70"));
             let ms: u64 = ms.parse().map_err(|_| format!("{word}: not a duration"))?;
-            let key = match name {
-                "wait" => Key::Char('\0'),
-                "left" => Key::Left,
-                "right" => Key::Right,
-                "up" => Key::Up,
-                "down" => Key::Down,
-                "esc" | "escape" => Key::Escape,
-                "tab" => Key::Tab,
-                "space" => Key::Char(' '),
-                "scrollup" => Key::Scroll(Wheel {
-                    back: true,
-                    far: false,
-                    across: false,
-                }),
-                "scrolldown" => Key::Scroll(Wheel {
-                    back: false,
-                    far: false,
-                    across: false,
-                }),
-                "click" => Key::LeftClick,
-                one if one.chars().count() == 1 => Key::Char(one.chars().next().unwrap()),
-                other => return Err(format!("{other}: not a key")),
+            let chord = match name {
+                "wait" => Vec::new(),
+                _ => name.split('+').map(&key).collect::<Result<Vec<_>, _>>()?,
             };
-            steps.push((key, Duration::from_millis(ms)));
+            steps.push((chord, Duration::from_millis(ms)));
         }
         Ok(Drill { steps, win: None })
     }
@@ -157,34 +183,62 @@ enum Stage {
 /// The pointer as something with weight, pulled at a target rather than put
 /// on one.
 ///
-/// A pointer that is placed where it belongs tells you nothing on the way;
-/// one that has to be got moving and then stopped shows you where it went,
-/// how far, and which way. Pressing again while it is still moving does not
-/// start the journey over, it adds to what is already there, so a run of
-/// presses down a list builds speed the way pushing anything repeatedly
-/// does.
+/// Arrow input accelerates it directly, release leaves a bounded coast, and
+/// the selected anchor keeps pulling until a close pass can snap. Named hints
+/// use the same spring without resetting existing velocity.
 struct Drift {
     at: (f64, f64),
     vel: (f64, f64),
-    /// How hard it is pulled, in radians a second. Set by whoever aimed it:
-    /// a step taken on its own is worth watching and takes its time, while
-    /// steps coming every seventy milliseconds have to be got through in
-    /// seventy milliseconds or the pointer falls behind the key.
+    /// What has caught it. None means the arrow keys are steering it freely.
+    to: Option<(f64, f64)>,
+    /// The anchor pulling on released free motion. This is separate from
+    /// `to`: attraction changes velocity continuously, while `to` is the
+    /// close-range spring that commits the landing to an exact point.
+    magnet: Option<(f64, f64)>,
+    /// The anchor this held input departed. It cannot steer the initial push,
+    /// attract the release, or catch the pointer during a short grace period.
+    ignore: Option<(f64, f64)>,
+    /// Seconds left in the departure anchor grace period.
+    ignore_for: f64,
+    /// How hard a named or snapped target pulls, in radians a second.
     rate: f64,
-    /// What is pulling it. A further press moves this without taking away
-    /// the speed the pointer already has, so stepping quickly runs the
-    /// targets together into one movement rather than a series of darts.
-    to: (f64, f64),
+    /// Seconds of uninterrupted directional thrust in the current gesture.
+    /// Fresh input ramps from fine control to full acceleration.
+    push_age: f64,
+    /// The most recent continuous navigation mode. Free mode uses this after
+    /// release to stop at the exact arbitrary coordinate instead of engaging
+    /// magnetic capture.
+    nav: NavMode,
     stepped: Instant,
 }
 
 impl Drift {
-    fn new(at: (f64, f64), to: (f64, f64), rate: f64) -> Self {
+    fn toward(at: (f64, f64), to: (f64, f64), rate: f64) -> Self {
         Drift {
             at,
             vel: (0.0, 0.0),
+            to: Some(to),
+            magnet: None,
+            ignore: None,
+            ignore_for: 0.0,
             rate,
-            to,
+            push_age: 0.0,
+            nav: NavMode::Normal,
+            stepped: Instant::now(),
+        }
+    }
+
+    fn free(at: (f64, f64)) -> Self {
+        Drift {
+            at,
+            vel: (0.0, 0.0),
+            to: None,
+            magnet: None,
+            ignore: None,
+            ignore_for: 0.0,
+            rate: config::get().pointer.spring(),
+            push_age: 0.0,
+            nav: NavMode::Normal,
             stepped: Instant::now(),
         }
     }
@@ -193,9 +247,34 @@ impl Drift {
         self.vel.0.hypot(self.vel.1)
     }
 
+    fn ignore_departure(&mut self, anchor: (f64, f64)) {
+        self.ignore = Some(anchor);
+        self.ignore_for = config::get().pointer.departure_ms as f64 / 1000.0;
+    }
+
+    fn release_target(&mut self) {
+        let released = self.to.take().or(self.magnet.take());
+        self.magnet = None;
+        if let Some(target) = released {
+            self.ignore_departure(target);
+            // A named or magnetic spring can be moving quickly in a
+            // direction unrelated to the arrow the user just pressed. Free
+            // navigation starts from rest; inertia belongs to arrow motion,
+            // not to the target that was just cancelled.
+            self.vel = (0.0, 0.0);
+            self.push_age = 0.0;
+        }
+    }
+
     /// Carry the pointer forward by however long it has been since the last
     /// time, and say whether it has come to rest.
-    fn step(&mut self, wall: (f64, f64)) -> bool {
+    fn step(
+        &mut self,
+        thrust: (f64, f64),
+        mode: NavMode,
+        anchors: &[(f64, f64)],
+        wall: (f64, f64),
+    ) -> bool {
         let now = Instant::now();
         // However long the loop took to come back, the motion is worked out
         // in short steps: taking a long gap in one go would fling the
@@ -206,22 +285,190 @@ impl Drift {
         while left > 0.0 {
             let dt = left.min(0.008);
             left -= dt;
-            done = self.advance(dt, wall);
+            done = self.advance_as(dt, thrust, mode, anchors, wall);
+            if done {
+                break;
+            }
         }
         done
     }
 
     /// The step itself, given how long it is. Apart from the clock this is
     /// all there is to the motion, so it is where the numbers can be checked.
-    fn advance(&mut self, dt: f64, wall: (f64, f64)) -> bool {
-        // A spring, damped a little under the point where it would stop
-        // dead. Under-damping is what gives the movement its tension: it
-        // leans into the target, arrives a hair past it and settles back,
-        // rather than creeping to a halt.
-        let w = self.rate;
-        let (dx, dy) = (self.to.0 - self.at.0, self.to.1 - self.at.1);
-        self.vel.0 += (dx * w * w - self.vel.0 * 1.35 * w) * dt;
-        self.vel.1 += (dy * w * w - self.vel.1 * 1.35 * w) * dt;
+    #[cfg(test)]
+    fn advance(
+        &mut self,
+        dt: f64,
+        thrust: (f64, f64),
+        anchors: &[(f64, f64)],
+        wall: (f64, f64),
+    ) -> bool {
+        self.advance_as(dt, thrust, NavMode::Normal, anchors, wall)
+    }
+
+    fn advance_as(
+        &mut self,
+        dt: f64,
+        thrust: (f64, f64),
+        mode: NavMode,
+        anchors: &[(f64, f64)],
+        wall: (f64, f64),
+    ) -> bool {
+        let cfg = &config::get().pointer;
+        let pushing = thrust != (0.0, 0.0);
+        if pushing {
+            // Direct calls to the physics step get the same immediate arrow
+            // takeover as the event loop. No magnetic velocity is allowed to
+            // masquerade as a key that is still held.
+            self.release_target();
+            self.nav = mode;
+        }
+        if self.ignore.is_some() {
+            self.ignore_for = (self.ignore_for - dt).max(0.0);
+        }
+        if self.ignore.is_some() && self.ignore_for <= f64::EPSILON {
+            // A short release must not immediately choose the anchor it just
+            // left. Once the grace period ends, it becomes eligible again so
+            // an isolated anchor can still pull the pointer home.
+            self.ignore = None;
+        }
+        if !pushing && self.nav == NavMode::Free {
+            self.to = None;
+            self.magnet = None;
+            self.vel = (0.0, 0.0);
+            self.push_age = 0.0;
+            return true;
+        }
+        let fresh_push = pushing && mode != NavMode::Free && self.push_age <= f64::EPSILON;
+        let push_scale = if pushing && mode != NavMode::Free {
+            self.push_age += dt;
+            let span = cfg.ramp_ms as f64 / 1000.0;
+            if span <= f64::EPSILON {
+                1.0
+            } else {
+                let t = (self.push_age / span).clamp(0.0, 1.0);
+                let eased = t * t * (3.0 - 2.0 * t);
+                INITIAL_THRUST + (1.0 - INITIAL_THRUST) * eased
+            }
+        } else {
+            self.push_age = 0.0;
+            0.0
+        };
+        let reach = cfg.attract_px.max(cfg.snap_px).max(0.0);
+        if self.to.is_none() && !pushing {
+            if self.magnet.is_none() {
+                // Use the drag-only stopping point so inertia decides between
+                // overlapping anchors. Choosing only from the current point
+                // makes a rightward release snap backward just before it
+                // crosses the midpoint. There is deliberately no distance
+                // cutoff: every release eventually lands on an anchor.
+                let projected = if cfg.drag > f64::EPSILON {
+                    (
+                        self.at.0 + self.vel.0 / cfg.drag,
+                        self.at.1 + self.vel.1 / cfg.drag,
+                    )
+                } else {
+                    self.at
+                };
+                self.magnet =
+                    nearest_point(projected, anchors, self.ignore).map(|(anchor, _)| anchor);
+            }
+            if let Some(anchor) = self.magnet {
+                let away = (anchor.0 - self.at.0).hypot(anchor.1 - self.at.1);
+                let catch = cfg.snap_px.max(1.5);
+                if away <= catch {
+                    self.to = Some(anchor);
+                    self.magnet = None;
+                    self.rate = cfg.spring();
+                }
+            }
+        }
+
+        match self.to {
+            // A spring damped a little under the point where it would stop
+            // dead. The small overshoot is the tension in the arrival.
+            Some((tx, ty)) => {
+                let w = self.rate;
+                let (dx, dy) = (tx - self.at.0, ty - self.at.1);
+                self.vel.0 += (dx * w * w - self.vel.0 * 1.35 * w) * dt;
+                self.vel.1 += (dy * w * w - self.vel.1 * 1.35 * w) * dt;
+            }
+            // Free motion has direct acceleration and a speed ceiling. When
+            // the keys are released, drag spends the velocity gradually.
+            None => {
+                if pushing && mode == NavMode::Free {
+                    let speed = cfg.direct_speed_px.max(1.0);
+                    self.vel = (thrust.0 * speed, thrust.1 * speed);
+                } else {
+                    if pushing && mode == NavMode::Straight {
+                        let along = (self.vel.0 * thrust.0 + self.vel.1 * thrust.1).max(0.0);
+                        self.vel = (thrust.0 * along, thrust.1 * along);
+                    }
+                    if fresh_push {
+                        let along = self.vel.0 * thrust.0 + self.vel.1 * thrust.1;
+                        let launch = cfg.launch_speed_px.max(0.0).min(cfg.speed_px.max(1.0));
+                        if along < launch {
+                            self.vel.0 += thrust.0 * (launch - along);
+                            self.vel.1 += thrust.1 * (launch - along);
+                        }
+                    }
+                    self.vel.0 += thrust.0 * cfg.accel_px.max(0.0) * push_scale * dt;
+                    self.vel.1 += thrust.1 * cfg.accel_px.max(0.0) * push_scale * dt;
+                }
+
+                if pushing && mode == NavMode::Normal {
+                    // A held arrow remains in control. The nearest anchor can
+                    // bend its path, but cannot catch it or overpower it.
+                    if let Some(((tx, ty), away)) = nearest_point(self.at, anchors, self.ignore) {
+                        let speed = self.speed();
+                        if away > f64::EPSILON && away < reach && speed > 5.0 {
+                            let influence = (1.0 - away / reach).sqrt();
+                            let moving = (speed / cfg.speed_px.max(1.0)).clamp(0.0, 1.0);
+                            let pull = cfg.accel_px.max(0.0) * 0.12 * influence * moving;
+                            self.vel.0 += (tx - self.at.0) / away * pull * dt;
+                            self.vel.1 += (ty - self.at.1) / away * pull * dt;
+                        }
+                    }
+                } else if let Some((tx, ty)) = self.magnet {
+                    // Released motion behaves like a stretched spring. Pull
+                    // grows with distance well beyond the softness radius,
+                    // so empty-space travel starts decisively while the
+                    // close approach remains controllable.
+                    let away = (tx - self.at.0).hypot(ty - self.at.1);
+                    if away > f64::EPSILON {
+                        let stretch = (away / reach.max(1.0)).min(4.0);
+                        let magnetic_accel = cfg.accel_px.max(cfg.speed_px.max(1.0) * 2.0);
+                        let pull = magnetic_accel * 0.70 * stretch;
+                        self.vel.0 += (tx - self.at.0) / away * pull * dt;
+                        self.vel.1 += (ty - self.at.1) / away * pull * dt;
+                    }
+                }
+
+                if !pushing {
+                    // Magnetic travel keeps more momentum than a free coast,
+                    // so a distant anchor remains reachable without turning
+                    // the release into a long crawl.
+                    let drag = if self.magnet.is_some() {
+                        cfg.drag.max(0.0) * 0.52
+                    } else {
+                        cfg.drag.max(0.0)
+                    };
+                    let keep = (-drag * dt).exp();
+                    self.vel.0 *= keep;
+                    self.vel.1 *= keep;
+                }
+                let top = match mode {
+                    NavMode::Free => cfg.direct_speed_px.max(1.0),
+                    _ => cfg.speed_px.max(1.0),
+                };
+                let speed = self.speed();
+                if speed > top {
+                    self.vel.0 *= top / speed;
+                    self.vel.1 *= top / speed;
+                }
+            }
+        }
+
         self.at.0 += self.vel.0 * dt;
         self.at.1 += self.vel.1 * dt;
         // Screens have edges, and a number that runs off one leaves the
@@ -235,10 +482,236 @@ impl Drift {
                 *vel = 0.0;
             }
         }
-        // Near enough and slow enough to call it arrived. Chasing the last
-        // fraction of a pixel keeps the loop busy for another quarter of a
-        // second and looks like nothing at all.
-        dx.hypot(dy) < 1.5 && self.speed() < 25.0
+        match self.to {
+            Some(to)
+                if (to.0 - self.at.0).hypot(to.1 - self.at.1) <= cfg.snap_px.max(1.5)
+                    && self.speed() <= (cfg.speed_px.max(1.0) * 0.18).max(25.0) =>
+            {
+                self.at = to;
+                self.vel = (0.0, 0.0);
+                true
+            }
+            Some(_) => false,
+            None => {
+                !pushing && self.magnet.is_none() && self.ignore.is_none() && self.speed() < 5.0
+            }
+        }
+    }
+}
+
+/// The closest anchor to a point, and the distance to it.
+fn nearest_point(
+    at: (f64, f64),
+    anchors: &[(f64, f64)],
+    ignore: Option<(f64, f64)>,
+) -> Option<((f64, f64), f64)> {
+    anchors
+        .iter()
+        .copied()
+        .filter(|p| ignore.is_none_or(|skip| (p.0 - skip.0).hypot(p.1 - skip.1) > 0.5))
+        .map(|p| (p, (p.0 - at.0).hypot(p.1 - at.1)))
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+}
+
+/// Choose the next visual box in one cardinal direction. Distance along the
+/// requested axis wins, with sideways drift penalized enough to keep a row
+/// or column straight. Vertical movement may continue in reading order when
+/// no box is directly in line.
+fn pull(
+    from: Rect,
+    (dx, dy): (f64, f64),
+    boxes: &[Rect],
+    reach: f64,
+    wander: bool,
+) -> Option<usize> {
+    const ACROSS: f64 = 2.0;
+    const SPREAD: (f64, f64) = (40.0, 0.3);
+
+    let gap = |(a0, a1): (f64, f64), (b0, b1): (f64, f64)| (b0 - a1).max(a0 - b1).max(0.0);
+    let span = |r: &Rect, across: bool| match across {
+        true if dx != 0.0 => (r.y as f64, (r.y + r.h) as f64),
+        true => (r.x as f64, (r.x + r.w) as f64),
+        false if dx != 0.0 => (r.x as f64, (r.x + r.w) as f64),
+        false => (r.y as f64, (r.y + r.h) as f64),
+    };
+    let edge = |r: &Rect| match (dx > 0.0, dy > 0.0, dx != 0.0) {
+        (true, _, true) => r.x as f64,
+        (false, _, true) => -((r.x + r.w) as f64),
+        (_, true, false) => r.y as f64,
+        (_, false, false) => -((r.y + r.h) as f64),
+    };
+    let ahead = |r: &Rect| edge(r) >= edge(&from) + 4.0;
+
+    let best = boxes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            let along = gap(span(&from, false), span(r, false));
+            let across = gap(span(&from, true), span(r, true));
+            let allowed = SPREAD.0 + SPREAD.1 * along;
+            (ahead(r) && across <= allowed && along <= reach)
+                .then_some((along + ACROSS * across, i))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, i)| i);
+    if best.is_some() || dx != 0.0 || !wander {
+        return best;
+    }
+
+    let (top, bottom) = (from.y as f64, (from.y + from.h) as f64);
+    boxes
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            let (rt, rb) = (r.y as f64, (r.y + r.h) as f64);
+            match dy > 0.0 {
+                true => rt >= bottom - 1.0 && rt - bottom <= reach,
+                false => rb <= top + 1.0 && top - rb <= reach,
+            }
+        })
+        .min_by(|(_, a), (_, b)| {
+            let key = |r: &Rect| match dy > 0.0 {
+                true => (r.y as f64, r.x as f64),
+                false => (-(r.y + r.h) as f64, -(r.x + r.w) as f64),
+            };
+            let (a, b) = (key(a), key(b));
+            a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+        })
+        .map(|(i, _)| i)
+}
+
+/// Keep a keyboard-driven pointer inside its active window and report each
+/// outward direction that hit an edge. A diagonal can therefore request one
+/// horizontal and one vertical wheel event without increasing pointer speed.
+fn constrain_to_window(
+    at: &mut (f64, f64),
+    vel: &mut (f64, f64),
+    thrust: (f64, f64),
+    (left, top, right, bottom): (f64, f64, f64, f64),
+) -> Vec<Arrow> {
+    let mut hit = Vec::with_capacity(2);
+    let (min_x, max_x) = (
+        left + EDGE_INSET,
+        (right - EDGE_INSET).max(left + EDGE_INSET),
+    );
+    let (min_y, max_y) = (
+        top + EDGE_INSET,
+        (bottom - EDGE_INSET).max(top + EDGE_INSET),
+    );
+    if thrust.0 < 0.0 && at.0 <= min_x {
+        at.0 = min_x;
+        vel.0 = 0.0;
+        hit.push(Arrow::Left);
+    } else if thrust.0 > 0.0 && at.0 >= max_x {
+        at.0 = max_x;
+        vel.0 = 0.0;
+        hit.push(Arrow::Right);
+    }
+    if thrust.1 < 0.0 && at.1 <= min_y {
+        at.1 = min_y;
+        vel.1 = 0.0;
+        hit.push(Arrow::Up);
+    } else if thrust.1 > 0.0 && at.1 >= max_y {
+        at.1 = max_y;
+        vel.1 = 0.0;
+        hit.push(Arrow::Down);
+    }
+    hit
+}
+
+/// Left, right, up, and down as one direction. Opposites cancel and a
+/// diagonal is normalized, so adding a second key changes direction without
+/// adding speed.
+fn arrow_direction(held: [bool; 4]) -> (f64, f64) {
+    let axis = |less: usize, more: usize| f64::from(held[more]) - f64::from(held[less]);
+    let (x, y) = (axis(0, 1), axis(2, 3));
+    let len = x.hypot(y);
+    match len > 0.0 {
+        true => (x / len, y / len),
+        false => (0.0, 0.0),
+    }
+}
+
+/// The first repeat from Hyprland arrives after the keyboard repeat delay,
+/// which is 600ms by default. Once repeats start, they arrive every 40ms at
+/// the default rate. These leases let a real hold bridge that first delay,
+/// then stop shortly after repeat pulses stop even if every release is lost.
+const INITIAL_ARROW_LEASE: Duration = Duration::from_millis(750);
+const REPEATED_ARROW_LEASE: Duration = Duration::from_millis(120);
+
+/// The four arrow keys as one direction. Each release removes only its own
+/// axis, which lets a diagonal turn into a cardinal hold without a stop.
+/// Leases remain as a last resort if a compositor drops every release edge.
+#[derive(Default)]
+struct ArrowKeys {
+    held: [Option<NavMode>; 4],
+    mode: NavMode,
+    expires: Option<Instant>,
+}
+
+impl ArrowKeys {
+    /// Record one edge or repeat pulse and report whether the set changed.
+    fn set(&mut self, which: usize, mode: NavMode, down: bool, now: Instant) -> bool {
+        if down {
+            self.mode = mode;
+            if self.held[which] == Some(mode) {
+                // Repeating arrow binds refresh a short lease. Hyprland stops
+                // their timer on any physical key edge, independently of
+                // whether its global-shortcut release reaches this client.
+                self.expires = Some(now + REPEATED_ARROW_LEASE);
+                return false;
+            }
+            self.held[which] = Some(mode);
+            self.expires = Some(now + INITIAL_ARROW_LEASE);
+        } else {
+            // A modifier may change while the physical arrow remains down.
+            // A late release for the old binding must not cancel the newer
+            // mode that replaced it.
+            if self.held[which] != Some(mode) {
+                return false;
+            }
+            self.held[which] = None;
+            if self.any() {
+                // The compositor may take a moment to resume repeats for a
+                // key that was held before the one just released.
+                self.expires = Some(now + INITIAL_ARROW_LEASE);
+            } else {
+                self.expires = None;
+            }
+        }
+        true
+    }
+
+    fn motion(&mut self, now: Instant) -> ((f64, f64), NavMode) {
+        if self.expires.is_some_and(|expires| now >= expires) {
+            self.clear();
+        }
+        if !self.any() {
+            return ((0.0, 0.0), NavMode::Normal);
+        }
+        (
+            arrow_direction(self.held.map(|held| held.is_some())),
+            self.mode,
+        )
+    }
+
+    fn any(&self) -> bool {
+        self.held.iter().any(Option::is_some)
+    }
+
+    /// The fallback keyboard path does not retain the modifier state from a
+    /// key's press. Its physical release still ends that direction safely.
+    fn release_any(&mut self, which: usize, now: Instant) -> bool {
+        let Some(mode) = self.held[which] else {
+            return false;
+        };
+        self.set(which, mode, false, now)
+    }
+
+    fn clear(&mut self) {
+        self.held.fill(None);
+        self.mode = NavMode::Normal;
+        self.expires = None;
     }
 }
 
@@ -285,8 +758,16 @@ struct App {
     seat_state: SeatState,
     shm: Shm,
     pool: SlotPool,
+    subcompositor_state: SubcompositorState,
     layer: Option<LayerSurface>,
+    /// A tiny subsurface that carries the moving focus ring. Repositioning it
+    /// does not repaint the full-output overlay.
+    pointer_overlay: Option<IndicatorOverlay>,
+    /// A second tiny subsurface that covers the nearest red anchor dot with a
+    /// blue one. It moves independently of the cached full-output frame.
+    anchor_overlay: Option<IndicatorOverlay>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
+    keyboard_modifiers: Modifiers,
     snap: Snapshot,
     font: Font,
     buffer_scale: i32,
@@ -300,10 +781,12 @@ struct App {
     target: Option<(f64, f64)>,
     button: u32,
     clicks: u32,
-    /// Where to send the pointer, once the loop can get to it, and how hard
-    /// to pull it there.
+    /// Where to send the pointer once the loop can get to it.
     aim: Option<(f64, f64)>,
-    rate: f64,
+    /// An anchor jump waiting to be sent without spring travel.
+    teleport: Option<(Target, (f64, f64))>,
+    /// Cancel motion at the next safe point outside an event callback.
+    stop_motion: bool,
     hints: Vec<Hint>,
     /// Keys already confirmed, narrowing the hints.
     typed: String,
@@ -312,43 +795,56 @@ struct App {
     charge: Option<Charge>,
     /// A scroll waiting for the loop to send it, and when to look at the
     /// window again once the scrolling stops.
-    scroll: Option<Wheel>,
+    scroll: VecDeque<Wheel>,
     settle: Option<Instant>,
+    /// One cooldown per edge, in left, right, up, down order.
+    edge_scrolled: [Option<Instant>; 4],
     /// Says how far the window moved under the overlay, wheel or otherwise.
     watch: Option<std::sync::mpsc::Receiver<(f64, f64)>>,
     /// With `keys.confirm` on, a key pressed once and not taken yet: it shows
     /// what it would select, and pressing it again takes it.
     armed: Option<char>,
-    /// The target a complete hint or tile picked out, waiting for a click
-    /// key. What a click key acts on, whether or not the pointer has caught
-    /// up with it yet.
+    /// What is highlighted and where a click key acts. During free movement
+    /// the target is the nearest anchor but the point is the pointer itself.
     picked: Option<(Target, (f64, f64))>,
     /// What the pointer is nearest at this moment, which is what is drawn
     /// lit. The same thing as `picked` once the pointer has come to rest.
     lit: Option<Target>,
-    /// Which arrow keys are down and since when: left, right, up, down. A
-    /// held key steps again and again, and `steps` counts how many times it
-    /// has, which is what makes it speed up.
-    held: [Option<Instant>; 4],
-    steps: [u32; 4],
+    /// Which arrow keys are live: left, right, up, down. They are combined
+    /// into one direction so a chord is one movement, not two independent
+    /// repeat queues.
+    arrows: ArrowKeys,
+    /// Whether arrow navigation has released the pointer from an anchor.
+    /// This remains true while it coasts and settles into its magnetic target.
+    free: bool,
     /// Where the pointer is right now, which while it is travelling is
     /// somewhere between two targets and worth drawing.
     pointer: Option<(f64, f64)>,
-    /// Whether the last frame drawn was dots rather than labels, so that the
-    /// labels coming back is a frame and not a wait for one.
+    /// A pre-rendered compact frame. Arrow input swaps this onto the main
+    /// surface without painting the output in the middle of motion.
+    navigation_buffer: Option<Buffer>,
+    /// Whether the last full frame used the compact anchor-dot fallback.
     showed_dots: bool,
-    /// When the arrows last stepped. While they are being used the labels
-    /// give way to a dot on each target: what is being watched is one dot
-    /// moving, and a screen of labels is a lot to look through to see it.
-    stepping: Option<Instant>,
+    /// When keyboard motion was last active. The full overlay remains stable
+    /// during motion; this drives the compact fallback when needed.
+    navigating: Option<Instant>,
     elements_cache: HashMap<usize, Vec<Element>>,
     pending_pick: Option<usize>,
     /// Whether nothing has happened since the overlay opened or was last
     /// reset, which is what lets the reset key close it.
     fresh: bool,
+    /// One clock shared by key-edge and motion traces, so an end-to-end run
+    /// can line compositor delivery up with the pointer response.
+    trace_started: Instant,
     /// An element query already in flight, so the wait for it overlaps the
     /// rest of the startup instead of following it.
     query: Option<Query>,
+}
+
+struct IndicatorOverlay {
+    surface: wl_surface::WlSurface,
+    subsurface: wl_subsurface::WlSubsurface,
+    visible: bool,
 }
 
 /// An element query running on its own thread.
@@ -431,6 +927,8 @@ pub fn run(
     let qh = queue.handle();
 
     let compositor = CompositorState::bind(&globals, &qh)?;
+    let subcompositor_state =
+        SubcompositorState::bind(compositor.wl_compositor().clone(), &globals, &qh)?;
     let layer_shell = LayerShell::bind(&globals, &qh)?;
     let shm = Shm::bind(&globals, &qh)?;
     let pool = SlotPool::new(4096, &shm)?;
@@ -444,8 +942,12 @@ pub fn run(
         seat_state: SeatState::new(&globals, &qh),
         shm,
         pool,
+        subcompositor_state,
         layer: None,
+        pointer_overlay: None,
+        anchor_overlay: None,
         keyboard: None,
+        keyboard_modifiers: Modifiers::default(),
         snap,
         font,
         buffer_scale,
@@ -459,24 +961,28 @@ pub fn run(
         button: BTN_LEFT,
         clicks: 1,
         aim: None,
-        rate: 0.0,
+        teleport: None,
+        stop_motion: false,
         hints: Vec::new(),
         typed: String::new(),
         charge: None,
-        scroll: None,
+        scroll: VecDeque::new(),
         settle: None,
+        edge_scrolled: [None; 4],
         watch: None,
         armed: None,
         picked: None,
         lit: None,
-        held: [None; 4],
-        steps: [0; 4],
+        arrows: ArrowKeys::default(),
+        free: false,
         pointer: None,
+        navigation_buffer: None,
         showed_dots: false,
-        stepping: None,
+        navigating: None,
         elements_cache: HashMap::new(),
         pending_pick,
         fresh: true,
+        trace_started: Instant::now(),
         query,
     };
 
@@ -499,6 +1005,7 @@ pub fn run(
     let empty = compositor.wl_compositor().create_region(&qh, ());
     surface.set_input_region(Some(&empty));
     empty.destroy();
+    let pointer_parent = surface.clone();
     let layer = layer_shell.create_layer_surface(
         &qh,
         surface,
@@ -526,6 +1033,36 @@ pub fn run(
     layer.commit();
     app.layer = Some(layer);
 
+    // The nearest-anchor dot and focus ring move on small surfaces. Moving
+    // either child only commits surface state; it does not clear and repaint
+    // the output-sized parent buffer. Create the focus ring last so it stays
+    // above the blue dot when both occupy the same point.
+    let (anchor_subsurface, anchor_surface) = app
+        .subcompositor_state
+        .create_subsurface(pointer_parent.clone(), &qh);
+    anchor_subsurface.set_desync();
+    let empty = compositor.wl_compositor().create_region(&qh, ());
+    anchor_surface.set_input_region(Some(&empty));
+    empty.destroy();
+    app.anchor_overlay = Some(IndicatorOverlay {
+        surface: anchor_surface,
+        subsurface: anchor_subsurface,
+        visible: false,
+    });
+
+    let (pointer_subsurface, pointer_surface) = app
+        .subcompositor_state
+        .create_subsurface(pointer_parent, &qh);
+    pointer_subsurface.set_desync();
+    let empty = compositor.wl_compositor().create_region(&qh, ());
+    pointer_surface.set_input_region(Some(&empty));
+    empty.destroy();
+    app.pointer_overlay = Some(IndicatorOverlay {
+        surface: pointer_surface,
+        subsurface: pointer_subsurface,
+        visible: false,
+    });
+
     // One virtual pointer for the whole run: it sends the pointer to a picked
     // target while the overlay is up, and clicks once it comes down.
     let pointer = vp_manager.as_ref().map(|mgr| {
@@ -544,12 +1081,15 @@ pub fn run(
     // a hand on the mouse.
     let mut resting: Option<(f64, f64)> = None;
     let mut looked = Instant::now();
-    let mut painted = Instant::now();
+    let mut painted_once = false;
 
     // A drill presses its own keys on a schedule and says what happened.
     let drilling = drill.is_some();
     let mut script = drill.map(|d| d.steps.into_iter()).into_iter().flatten();
-    let mut pending: Option<(Key, Instant)> = None;
+    // Keys, release time, and the next synthetic arrow repeat. The drill
+    // mirrors Hyprland's default 600ms delay and 25Hz repeat rate so long
+    // scripted holds exercise the same leases as physical holds.
+    let mut pending: Option<(Vec<Key>, Instant, Instant)> = None;
     let mut next_step = Instant::now() + Duration::from_millis(400);
     let mut step_no = 0usize;
     let mut settling: Option<Instant> = None;
@@ -592,8 +1132,10 @@ pub fn run(
             // whichever comes first.
             queue.flush()?;
             if let Some(guard) = queue.prepare_read() {
-                let wait = if drift.is_some() || app.settle.is_some() {
-                    Duration::from_millis(8)
+                let wait = if let Some(drift) = drift.as_ref() {
+                    MOTION_FRAME.saturating_sub(drift.stepped.elapsed())
+                } else if app.settle.is_some() {
+                    MOTION_FRAME
                 } else if app.watch.is_some() {
                     // Often enough to catch a scroll that went past the
                     // overlay; the check itself is one message.
@@ -603,7 +1145,9 @@ pub fn run(
                     // rather than pointer steps: often enough to look like a
                     // fill, rarely enough that a whole output redraw keeps up.
                     Duration::from_millis(30)
-                } else if app.stepping.is_some() {
+                } else if drilling && pending.is_some() {
+                    Duration::from_millis(20)
+                } else if app.navigating.is_some() {
                     // Waiting for the labels to be due back.
                     Duration::from_millis(60)
                 } else if config::get().pointer.cancel_px > 0.0 {
@@ -634,20 +1178,29 @@ pub fn run(
                     app.exit = true;
                 }
                 // Let go of whatever is being held once its time is up.
-                if let Some((key, until)) = pending {
-                    if now >= until {
-                        app.release(key);
-                        pending = None;
-                        next_step = now + Duration::from_millis(600);
+                if pending.as_ref().is_some_and(|(_, until, _)| now >= *until) {
+                    if let Some((keys, _, _)) = pending.take() {
+                        for key in keys {
+                            app.release(key);
+                        }
+                    }
+                    next_step = now + Duration::from_millis(600);
+                }
+                if let Some((keys, until, repeat_at)) = pending.as_mut() {
+                    if now < *until && now >= *repeat_at {
+                        if let Some(&key) = keys.iter().rev().find(|key| key.repeats()) {
+                            app.press(key);
+                        }
+                        *repeat_at = now + Duration::from_millis(40);
                     }
                 }
                 // And take the next step when the last one has settled.
                 if pending.is_none() && now >= next_step {
                     match script.next() {
-                        Some((Key::Char('\0'), how_long)) => {
+                        Some((keys, how_long)) if keys.is_empty() => {
                             next_step = now + how_long;
                         }
-                        Some((key, how_long)) => {
+                        Some((keys, how_long)) => {
                             step_no += 1;
                             let at = pointer_at.unwrap_or_default();
                             let now_at = where_now(&app, at);
@@ -659,10 +1212,13 @@ pub fn run(
                                 ),
                                 None => eprintln!("  start at {now_at}"),
                             }
-                            eprintln!("step {step_no}: {key:?} held {}ms", how_long.as_millis());
+                            eprintln!("step {step_no}: {keys:?} held {}ms", how_long.as_millis());
                             was = Some((at, now_at));
-                            app.press(key);
-                            pending = Some((key, now + how_long));
+                            for &key in &keys {
+                                app.press(key);
+                            }
+                            pending =
+                                Some((keys, now + how_long, now + Duration::from_millis(600)));
                         }
                         None if settling.is_none() => {
                             settling = Some(now + Duration::from_millis(500));
@@ -684,8 +1240,10 @@ pub fn run(
                     }
                 }
             }
-            if let (Some(wheel), Some(vp)) = (app.scroll.take(), pointer.as_ref()) {
-                send_scroll(vp, wheel);
+            if let Some(vp) = pointer.as_ref() {
+                while let Some(wheel) = app.scroll.pop_front() {
+                    send_scroll(vp, wheel);
+                }
                 queue.flush()?;
             }
             // Someone scrolled the window without going through the overlay,
@@ -695,34 +1253,44 @@ pub fn run(
             }
             // Everything has moved, so the hints have to be read again. Once
             // the scrolling stops, not on every press of a key held down.
-            if app.settle.is_some_and(|at| Instant::now() >= at) {
+            if app.settle.is_some_and(|at| Instant::now() >= at)
+                && !app.any_arrow()
+                && drift.is_none()
+            {
                 app.resettle();
             }
             if app.charging() {
                 app.dirty = true;
             }
-            // A picked target wants the pointer on it. Doing that here rather
+            // A named target wants the pointer on it. Doing that here rather
             // than where it was picked keeps the requests and their roundtrip
             // out of the middle of an event callback.
-            // A key held down repeats its step, quicker the longer it is
-            // held. Holding is meant to cover ground, and covering it target
-            // by target keeps every landing on something: a free flight ends
-            // wherever it ends, which is what made letting go feel like the
-            // pointer was still being pushed.
-            app.repeat_held();
+            if app.stop_motion {
+                drift = None;
+                app.stop_motion = false;
+            }
+            if let Some((what, to)) = app.teleport.take() {
+                drift = None;
+                pointer_at = Some(to);
+                if let Some(vp) = pointer.as_ref() {
+                    send_pointer_motion(vp, to, app.snap.layout_extent);
+                    queue.flush()?;
+                }
+                app.land_target(what, to);
+                resting = None;
+            }
             if let Some(to) = app.aim.take() {
-                let rate = match app.rate > 0.0 {
-                    true => app.rate,
-                    false => config::get().pointer.spring(),
-                };
                 match (drift.as_mut(), pointer_at) {
-                    // Already moving: aim it somewhere else and let it keep
-                    // the speed it has, so a run of steps is one movement.
+                    // Already moving: let the spring catch it without taking
+                    // away the speed it has.
                     (Some(d), _) => {
-                        d.to = to;
-                        d.rate = rate;
+                        d.magnet = None;
+                        d.to = Some(to);
+                        d.rate = config::get().pointer.spring();
                     }
-                    (None, Some(from)) => drift = Some(Drift::new(from, to, rate)),
+                    (None, Some(from)) => {
+                        drift = Some(Drift::toward(from, to, config::get().pointer.spring()))
+                    }
                     // Nowhere to travel from, so just be there.
                     (None, None) => {
                         pointer_at = Some(to);
@@ -735,47 +1303,116 @@ pub fn run(
                 }
                 resting = None;
             }
-            if let (Some(d), Some(vp)) = (drift.as_mut(), pointer.as_ref()) {
+
+            // Every arrow currently down becomes one normalized direction.
+            // Starting free motion once per chord leaves no queued horizontal
+            // or vertical repeats to carry on after the chord is released.
+            let (thrust, nav_mode) = app.motion();
+            if app.any_arrow() {
+                match drift.as_mut() {
+                    Some(d) => d.release_target(),
+                    None => {
+                        let from = pointer_at.unwrap_or_default();
+                        let mut next = Drift::free(from);
+                        if let Some((_, anchor, _)) =
+                            app.nearest(from).filter(|(_, _, away)| *away <= CAUGHT)
+                        {
+                            next.ignore_departure(anchor);
+                        }
+                        drift = Some(next);
+                    }
+                }
+            }
+            let motion_due = drift
+                .as_ref()
+                .is_some_and(|drift| drift.stepped.elapsed() >= MOTION_FRAME);
+            if let (true, Some(vp), Some(d)) = (motion_due, pointer.as_ref(), drift.as_mut()) {
                 // The pointer is being moved from here, so where it is says
                 // nothing about hands.
                 looked = Instant::now();
                 resting = None;
                 let extent = app.snap.layout_extent;
                 let wall = ((extent.0 - 1) as f64, (extent.1 - 1) as f64);
-                let done = d.step(wall);
+                let anchors: Vec<(f64, f64)> =
+                    app.targets().into_iter().map(|(_, at)| at).collect();
+                let frame_gap = d.stepped.elapsed().as_secs_f64() * 1000.0;
+                let done = d.step(thrust, nav_mode, &anchors, wall);
+                let edges = app
+                    .navigation_bounds()
+                    .map(|bounds| constrain_to_window(&mut d.at, &mut d.vel, thrust, bounds))
+                    .unwrap_or_default();
+                for way in edges {
+                    app.queue_edge_scroll(way);
+                }
                 if std::env::var_os("WL_TRACE").is_some() {
+                    let state = if d.to.is_some() {
+                        "spring"
+                    } else if d.magnet.is_some() {
+                        "attract"
+                    } else if thrust != (0.0, 0.0) && nav_mode == NavMode::Straight {
+                        "straight"
+                    } else if thrust != (0.0, 0.0) && nav_mode == NavMode::Free {
+                        "direct"
+                    } else {
+                        "free"
+                    };
+                    let active = d.to.or(d.magnet).map(|at| {
+                        let away = (at.0 - d.at.0).hypot(at.1 - d.at.1);
+                        (at, away)
+                    });
+                    let (anchor, distance) = active
+                        .or_else(|| app.nearest(d.at).map(|(_, at, away)| (at, away)))
+                        .map(|(at, away)| (format!("({:.2},{:.2})", at.0, at.1), away))
+                        .unwrap_or_else(|| ("none".into(), f64::NAN));
                     eprintln!(
-                        "t={} at=({:.0},{:.0}) v=({:.0},{:.0}) to=({:.0},{:.0})",
-                        start.elapsed().as_millis(),
+                        "NAV frame t={} gap={frame_gap:.2} input=({:.3},{:.3}) \
+                         at=({:.2},{:.2}) velocity=({:.2},{:.2}) speed={:.2} \
+                         state={state} anchor={anchor} distance={distance:.2} done={done}",
+                        app.trace_started.elapsed().as_millis(),
+                        thrust.0,
+                        thrust.1,
                         d.at.0,
                         d.at.1,
                         d.vel.0,
                         d.vel.1,
-                        d.to.0,
-                        d.to.1
+                        d.speed(),
                     );
                 }
-                let caught = (d.to.0 - d.at.0).hypot(d.to.1 - d.at.1) < CAUGHT;
-                move_and_click(vp, d.at, extent, None, &mut queue, &mut app)?;
+                send_pointer_motion(vp, d.at, extent);
+                queue.flush()?;
                 pointer_at = Some(d.at);
                 app.pointer = Some(d.at);
-                // With the labels out of the way there is little enough on
-                // screen to draw it every step of the journey, and a journey
-                // drawn every step is one you can watch. With them up it
-                // costs tens of milliseconds a frame, so only the arrival is
-                // drawn: painting one mid-way is what would make it stutter.
-                if app.dots() {
-                    app.dirty = true;
-                    app.light_up(d.at);
-                } else if caught || done {
-                    app.light_up(d.at);
+                if app.free {
+                    app.show_pointer_indicator(true);
+                    app.navigating = Some(Instant::now());
+                }
+                // Track the nearest anchor in state, but do not repaint the
+                // full output for it. The pointer subsurface above is the
+                // live frame; the labels catch up once motion stops.
+                app.follow_pointer(d.at);
+                if app.free {
+                    app.update_anchor_indicator(d.at);
+                    // This parent commit applies both small subsurface
+                    // positions in one frame.
+                    app.move_pointer_indicator(d.at);
                 }
                 if done {
+                    if app.free {
+                        if let Some(to) = d.to {
+                            app.land(to);
+                        }
+                    }
                     drift = None;
                 }
             }
-            // The labels are due back once the stepping has stopped.
-            if app.showed_dots != app.dots() {
+            // The labels are due back once navigation has stopped. Clear the
+            // timestamp as well, so an expired wake delay does not keep the
+            // idle loop polling forever.
+            let dots = app.dots();
+            if app.navigating.is_some() && !dots {
+                app.navigating = None;
+            }
+            if app.showed_dots != dots {
                 app.dirty = true;
             }
             // A hand on the mouse says the keyboard was not what was wanted
@@ -798,14 +1435,13 @@ pub fn run(
                 }
             }
             if !app.exit && app.configured && app.dirty {
-                // A whole output takes long enough to paint that painting one
-                // between two steps of a flight is most of the time the
-                // flight had to move in. While the pointer is going, the
-                // labels keep up as often as they can afford to.
-                let spare = drift.is_none() || painted.elapsed() > Duration::from_millis(55);
-                if spare {
-                    painted = Instant::now();
+                // A full-output redraw stalls pointer updates for tens of
+                // milliseconds. Paint the first frame, then leave it stable
+                // throughout a flight. The small pointer subsurface is the
+                // only surface that needs to move live.
+                if drift.is_none() || !painted_once || app.showed_dots != app.dots() {
                     app.draw();
+                    painted_once = true;
                 }
             }
         }
@@ -815,6 +1451,14 @@ pub fn run(
     // the window below instead of this surface. Dropping the shortcuts first
     // puts the keyboard back the way it was.
     drop(shortcuts);
+    if let Some(pointer) = app.pointer_overlay.take() {
+        pointer.subsurface.destroy();
+        pointer.surface.destroy();
+    }
+    if let Some(anchor) = app.anchor_overlay.take() {
+        anchor.subsurface.destroy();
+        anchor.surface.destroy();
+    }
     app.layer.take();
     queue.roundtrip(&mut app)?;
 
@@ -908,18 +1552,26 @@ fn send_scroll(vp: &ZwlrVirtualPointerV1, wheel: Wheel) {
     }
 }
 
-fn move_and_click<S>(
+fn send_pointer_motion(
     vp: &ZwlrVirtualPointerV1,
     (gx, gy): (f64, f64),
     (ext_w, ext_h): (i32, i32),
-    click: Option<(u32, u32)>,
-    queue: &mut wayland_client::EventQueue<S>,
-    state: &mut S,
-) -> Result<(), Box<dyn Error>> {
+) {
     let x = gx.round().clamp(0.0, (ext_w - 1) as f64) as u32;
     let y = gy.round().clamp(0.0, (ext_h - 1) as f64) as u32;
     vp.motion_absolute(0, x, y, ext_w as u32, ext_h as u32);
     vp.frame();
+}
+
+fn move_and_click<S>(
+    vp: &ZwlrVirtualPointerV1,
+    at: (f64, f64),
+    extent: (i32, i32),
+    click: Option<(u32, u32)>,
+    queue: &mut wayland_client::EventQueue<S>,
+    state: &mut S,
+) -> Result<(), Box<dyn Error>> {
+    send_pointer_motion(vp, at, extent);
     queue.roundtrip(state)?;
     if let Some((button, times)) = click {
         for n in 0..times.max(1) {
@@ -937,6 +1589,147 @@ fn move_and_click<S>(
 }
 
 impl App {
+    fn trace_key(&self, edge: &str, key: Key) {
+        if std::env::var_os("WL_KEYS").is_some() {
+            eprintln!(
+                "NAV key t={} edge={edge} key={}",
+                self.trace_started.elapsed().as_millis(),
+                key.name()
+            );
+        }
+    }
+
+    /// Map or clear the small focus-ring surface. This allocates only a
+    /// 48-pixel logical square, unlike a normal overlay redraw.
+    fn show_pointer_indicator(&mut self, show: bool) {
+        let Some(pointer) = self.pointer_overlay.as_ref() else {
+            return;
+        };
+        if pointer.visible == show {
+            return;
+        }
+        let surface = pointer.surface.clone();
+        let scale = self.buffer_scale;
+        let side = POINTER_SURFACE_SIZE * scale;
+        let (buffer, buf) =
+            match self
+                .pool
+                .create_buffer(side, side, side * 4, wl_shm::Format::Argb8888)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("pointer buffer allocation failed: {e}");
+                    return;
+                }
+            };
+        let mut canvas = Canvas {
+            buf,
+            w: side,
+            h: side,
+        };
+        canvas.clear(Color::new(0.0, 0.0, 0.0, 0.0));
+        if show {
+            let center = side as f32 / 2.0;
+            draw_pointer_mark(&mut canvas, center, center, scale);
+        }
+        surface.set_buffer_scale(scale);
+        if buffer.attach_to(&surface).is_err() {
+            eprintln!("failed to attach pointer buffer");
+            return;
+        }
+        surface.damage_buffer(0, 0, side, side);
+        surface.commit();
+        if let Some(pointer) = self.pointer_overlay.as_mut() {
+            pointer.visible = show;
+        }
+    }
+
+    /// Map or clear the blue nearest-anchor dot. Like the focus ring, this is
+    /// a tiny buffer and never repaints the full navigation frame.
+    fn show_anchor_indicator(&mut self, show: bool) {
+        let Some(anchor) = self.anchor_overlay.as_ref() else {
+            return;
+        };
+        if anchor.visible == show {
+            return;
+        }
+        let surface = anchor.surface.clone();
+        let scale = self.buffer_scale;
+        let side = ANCHOR_SURFACE_SIZE * scale;
+        let (buffer, buf) =
+            match self
+                .pool
+                .create_buffer(side, side, side * 4, wl_shm::Format::Argb8888)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("anchor buffer allocation failed: {e}");
+                    return;
+                }
+            };
+        let mut canvas = Canvas {
+            buf,
+            w: side,
+            h: side,
+        };
+        canvas.clear(Color::new(0.0, 0.0, 0.0, 0.0));
+        if show {
+            let center = side as f32 / 2.0;
+            draw_nearest_anchor_mark(&mut canvas, center, center, scale);
+        }
+        surface.set_buffer_scale(scale);
+        if buffer.attach_to(&surface).is_err() {
+            eprintln!("failed to attach anchor buffer");
+            return;
+        }
+        surface.damage_buffer(0, 0, side, side);
+        surface.commit();
+        if let Some(anchor) = self.anchor_overlay.as_mut() {
+            anchor.visible = show;
+        }
+    }
+
+    /// Put the blue dot on the anchor currently nearest the free pointer.
+    /// The following focus-ring move commits both synchronized positions.
+    fn update_anchor_indicator(&mut self, pointer_at: (f64, f64)) {
+        if !self.free {
+            self.show_anchor_indicator(false);
+            return;
+        }
+        let Some((_, at, _)) = self.nearest(pointer_at) else {
+            self.show_anchor_indicator(false);
+            return;
+        };
+        self.show_anchor_indicator(true);
+        let Some(anchor) = self.anchor_overlay.as_ref() else {
+            return;
+        };
+        let mon = &self.snap.monitor;
+        let half = ANCHOR_SURFACE_SIZE as f64 / 2.0;
+        let x = (at.0 - mon.x as f64 - half).round() as i32;
+        let y = (at.1 - mon.y as f64 - half).round() as i32;
+        anchor.subsurface.set_position(x, y);
+    }
+
+    /// Reposition the focus ring by committing only subsurface state. The
+    /// parent label or anchor-dot frame stays untouched.
+    fn move_pointer_indicator(&self, (px, py): (f64, f64)) {
+        let (Some(pointer), Some(layer)) = (&self.pointer_overlay, &self.layer) else {
+            return;
+        };
+        if !pointer.visible {
+            return;
+        }
+        let mon = &self.snap.monitor;
+        let half = POINTER_SURFACE_SIZE as f64 / 2.0;
+        let x = (px - mon.x as f64 - half).round() as i32;
+        let y = (py - mon.y as f64 - half).round() as i32;
+        pointer.subsurface.set_position(x, y);
+        // Subsurface positions are synchronized with the parent even when
+        // the child buffer itself is desynchronized.
+        layer.wl_surface().commit();
+    }
+
     fn find_output(&self) -> Option<wl_output::WlOutput> {
         for output in self.output_state.outputs() {
             if let Some(info) = self.output_state.info(&output) {
@@ -965,8 +1758,33 @@ impl App {
         if matches!(self.stage, Stage::PickWindow) {
             return;
         }
-        self.scroll = Some(wheel);
+        self.scroll.push_back(wheel);
         self.shifted((0.0, 0.0));
+    }
+
+    fn navigation_bounds(&self) -> Option<(f64, f64, f64, f64)> {
+        let win = match self.stage {
+            Stage::PickHint { win } | Stage::PickTile { win } => win,
+            Stage::PickWindow => return None,
+        };
+        self.snap.windows.get(win).map(|w| {
+            (
+                w.x as f64,
+                w.y as f64,
+                (w.x + w.w - 1) as f64,
+                (w.y + w.h - 1) as f64,
+            )
+        })
+    }
+
+    fn queue_edge_scroll(&mut self, way: Arrow) {
+        let now = Instant::now();
+        let last = &mut self.edge_scrolled[way.index()];
+        if last.is_some_and(|then| now.duration_since(then) < EDGE_SCROLL_INTERVAL) {
+            return;
+        }
+        *last = Some(now);
+        self.roll(way.wheel());
     }
 
     /// The window moved under the overlay: the labels name where things were.
@@ -993,9 +1811,12 @@ impl App {
             h.cx += dx;
             h.cy += dy;
         }
-        if let Some((Target::Hint(i), at)) = self.picked {
-            if self.hints.get(i).is_some_and(|h| h.scrolls) {
-                self.picked = Some((Target::Hint(i), (at.0 + dx, at.1 + dy)));
+        self.navigation_buffer = None;
+        if !self.free {
+            if let Some((Target::Hint(i), at)) = self.picked {
+                if self.hints.get(i).is_some_and(|h| h.scrolls) {
+                    self.picked = Some((Target::Hint(i), (at.0 + dx, at.1 + dy)));
+                }
             }
         }
     }
@@ -1006,10 +1827,49 @@ impl App {
             Stage::PickHint { win } | Stage::PickTile { win } => win,
             Stage::PickWindow => return,
         };
+        let at = self
+            .pointer
+            .or_else(|| self.picked.map(|(_, at)| at))
+            .or_else(hypr::cursor_pos);
+        let keep_free = self.free;
         self.settle = None;
-        self.elements_cache.remove(&win);
-        self.pending_pick = Some(win);
-        self.process_pending_pick();
+        self.load_elements(win, true);
+        if self.elements_cache.get(&win).is_none_or(Vec::is_empty) {
+            self.hints.clear();
+            self.watch = None;
+            self.stage = Stage::PickTile { win };
+        } else {
+            self.install_hint_stage(win);
+        }
+
+        self.typed.clear();
+        self.armed = None;
+        self.charge = None;
+        self.aim = None;
+        self.teleport = None;
+        self.stop_motion = false;
+        self.navigation_buffer = None;
+        self.lit = None;
+        self.picked = None;
+        self.pointer = at;
+        self.free = keep_free;
+        if let Some(at) = at {
+            if keep_free {
+                self.follow_pointer(at);
+                self.show_pointer_indicator(true);
+                self.update_anchor_indicator(at);
+                self.move_pointer_indicator(at);
+            } else if let Some((what, anchor, _)) = self.nearest(at) {
+                self.picked = Some((what, anchor));
+                self.lit = Some(what);
+                self.show_pointer_indicator(false);
+                self.show_anchor_indicator(false);
+            }
+        } else {
+            self.show_pointer_indicator(false);
+            self.show_anchor_indicator(false);
+        }
+        self.dirty = true;
     }
 
     /// Whether a hold is running and drawing, which is what the loop watches
@@ -1021,6 +1881,10 @@ impl App {
     /// The box the fill sits under: whatever a click would land on, in global
     /// logical coordinates.
     fn charge_target(&self) -> Option<(f64, f64, f64, f64)> {
+        if self.free {
+            let (_, (x, y)) = self.picked?;
+            return Some((x - 8.0, y - 8.0, 16.0, 16.0));
+        }
         match (self.picked?, self.stage) {
             ((Target::Hint(i), _), _) => self.hints.get(i).map(|h| (h.rx, h.ry, h.rw, h.rh)),
             ((Target::Tile(ch), _), Stage::PickTile { win }) => {
@@ -1048,10 +1912,8 @@ impl App {
     /// A click key coming up spends the hold.
     fn release(&mut self, key: Key) {
         match key {
-            Key::Left => return self.hold_arrow(0, false),
-            Key::Right => return self.hold_arrow(1, false),
-            Key::Up => return self.hold_arrow(2, false),
-            Key::Down => return self.hold_arrow(3, false),
+            Key::Arrow(_, NavMode::Instant) => return,
+            Key::Arrow(way, mode) => return self.hold_arrow(way.index(), mode, false),
             _ => {}
         }
         let (Some(button), Some(charge)) = (Self::click_button(key), self.charge.take()) else {
@@ -1070,6 +1932,12 @@ impl App {
     }
 
     fn press(&mut self, key: Key) {
+        if !key.is_motion_arrow() {
+            // Any deliberate non-navigation input ends the chord. This also
+            // recovers from a compositor release event that never arrived.
+            self.arrows.clear();
+            self.stop_motion = true;
+        }
         match (&self.charge, Self::click_button(key)) {
             // Held keys repeat. A repeat is not a second press, and taking it
             // for one would restart the hold it is meant to be measuring.
@@ -1092,10 +1960,8 @@ impl App {
             Key::Tab => return self.pick_window(),
             Key::Reset => return self.reset_or_quit(),
             Key::Switch => return self.switch_mode(),
-            Key::Left => return self.hold_arrow(0, true),
-            Key::Right => return self.hold_arrow(1, true),
-            Key::Up => return self.hold_arrow(2, true),
-            Key::Down => return self.hold_arrow(3, true),
+            Key::Arrow(way, NavMode::Instant) => return self.jump_anchor(way),
+            Key::Arrow(way, mode) => return self.hold_arrow(way.index(), mode, true),
             Key::Scroll(w) => return self.roll(w),
             Key::Char(ch) => ch.to_ascii_lowercase(),
             // Taken above, before anything could cancel a hold.
@@ -1125,7 +1991,7 @@ impl App {
             return;
         }
         // Typing is asking for the labels, so they come back at once.
-        self.stepping = None;
+        self.navigating = None;
         self.dirty = true;
         self.fresh = false;
         match self.stage {
@@ -1187,6 +2053,11 @@ impl App {
         // one can be picked without backing out first.
         self.typed.clear();
         self.armed = None;
+        self.free = false;
+        self.show_pointer_indicator(false);
+        self.show_anchor_indicator(false);
+        self.arrows.clear();
+        self.stop_motion = false;
         self.picked = Some((what, at));
         // The overlay takes no pointer input, so sending the pointer here
         // lands it on the window underneath: whatever is under it lights up
@@ -1202,12 +2073,15 @@ impl App {
     /// Every target the current mode offers, with where clicking it would
     /// land.
     fn targets(&self) -> Vec<(Target, (f64, f64))> {
-        self.boxed().into_iter().map(|(t, at, _)| (t, at)).collect()
+        self.boxed()
+            .into_iter()
+            .map(|(what, at, _)| (what, at))
+            .collect()
     }
 
-    /// Every target with the box it stands for, which is what stepping goes
-    /// by: a list of links is a column to the eye however much their middles
-    /// wander with the length of the text.
+    /// Targets with their visible bounds. Instant directional movement uses
+    /// the bounds so rows and columns behave like rows and columns even when
+    /// labels have different widths.
     fn boxed(&self) -> Vec<(Target, (f64, f64), Rect)> {
         match self.stage {
             Stage::PickHint { .. } => self
@@ -1240,134 +2114,93 @@ impl App {
         }
     }
 
-    /// Move the target one step in a direction.
-    ///
-    /// Anything roughly in line with the current target wins first, nearest
-    /// one taken, which is what walks a row of buttons or a column of list
-    /// items the way you would expect. Only when there is nothing in line does
-    /// the search widen to a cone, so leaving the end of a row still goes
-    /// somewhere sensible rather than nowhere.
-    /// An arrow key going down or coming up. Holding one pushes the pointer
-    /// that way for as long as it is held, so a tap nudges it to the next
-    /// thing along and a hold carries it across the window.
-    fn hold_arrow(&mut self, which: usize, down: bool) {
-        let already = self.held[which].is_some();
-        // Always restamp on the way down. A press that finds the key already
-        // held is a release that went missing, and leaving the old stamp
-        // there would leave that direction dead.
-        self.held[which] = down.then(Instant::now);
-        self.steps[which] = 0;
-        if already == down || !down {
+    /// Move immediately to the next anchor in one cardinal direction.
+    fn jump_anchor(&mut self, way: Arrow) {
+        if matches!(self.stage, Stage::PickWindow) || self.settle.is_some() {
             return;
         }
+        let Some(from) = self
+            .pointer
+            .or_else(|| self.picked.map(|(_, at)| at))
+            .or_else(hypr::cursor_pos)
+        else {
+            return;
+        };
+        let current = self
+            .nearest(from)
+            .filter(|(_, _, away)| *away <= CAUGHT)
+            .map(|(what, _, _)| what);
+        let all = self.boxed();
+        let mine = current
+            .and_then(|what| {
+                all.iter()
+                    .find(|(candidate, _, _)| *candidate == what)
+                    .map(|(_, _, rect)| *rect)
+            })
+            .unwrap_or_else(|| Rect::new(from.0 as f32, from.1 as f32, 1.0, 1.0));
+        let candidates: Vec<(Target, (f64, f64), Rect)> = all
+            .into_iter()
+            .filter(|(what, _, _)| Some(*what) != current)
+            .collect();
+        let boxes: Vec<Rect> = candidates.iter().map(|(_, _, rect)| *rect).collect();
+        let Some(next) = pull(mine, way.vector(), &boxes, f64::INFINITY, true) else {
+            // With no further anchor, the same intent continues into the
+            // document instead of making the instant-navigation key inert.
+            self.queue_edge_scroll(way);
+            return;
+        };
+        let (what, at, _) = candidates[next];
         self.fresh = false;
-        self.dirty |= !self.typed.is_empty() || self.armed.is_some();
         self.typed.clear();
         self.armed = None;
         self.charge = None;
-        self.hop(Self::WAYS[which], false);
+        self.aim = None;
+        self.teleport = Some((what, at));
+        self.stop_motion = true;
     }
 
-    /// The four directions, in the order the keys are held in.
-    const WAYS: [(f64, f64); 4] = [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)];
+    /// An arrow key going down or coming up. Holding one pushes the pointer
+    /// that way for as long as it is held, so a tap nudges it a short
+    /// distance and a hold carries it across the window.
+    fn hold_arrow(&mut self, which: usize, mode: NavMode, down: bool) {
+        let now = Instant::now();
+        if !self.arrows.set(which, mode, down, now) {
+            return;
+        }
+        if !down {
+            return;
+        }
+        self.fresh = false;
+        self.free = true;
+        self.aim = None;
+        self.stop_motion = false;
+        self.navigating = Some(now);
+        self.typed.clear();
+        self.armed = None;
+        self.charge = None;
+        if !self.show_navigation_frame() {
+            self.dirty = true;
+        }
+    }
 
-    /// Whether the labels are out of the way at this moment, which they are
-    /// while the arrows are stepping and for a moment after.
+    /// Expire a direction whose release got lost, then combine every key
+    /// still down into one unit vector. Normalizing keeps diagonal and
+    /// cardinal navigation at the same speed.
+    fn motion(&mut self) -> ((f64, f64), NavMode) {
+        self.arrows.motion(Instant::now())
+    }
+
+    fn any_arrow(&self) -> bool {
+        self.arrows.any()
+    }
+
+    /// Whether a compact anchor-only frame would be appropriate. Full frames
+    /// are suspended during motion when the pointer subsurface is available.
     fn dots(&self) -> bool {
-        self.stepping
-            .is_some_and(|t| t.elapsed() < config::get().label.wake())
-    }
-
-    /// Send the pointer to the next target that way.
-    ///
-    /// A press will cross a gap and, going up or down, carry on in reading
-    /// order when nothing is in line. A key held down will not do either: it
-    /// keeps to the run it is walking and stops at the end of it. Otherwise
-    /// holding down a list runs off the end of it, leaps to whatever section
-    /// is next, and keeps going there, which is a key that has taken on a
-    /// life of its own.
-    fn hop(&mut self, way: (f64, f64), held: bool) -> bool {
-        self.stepping = Some(Instant::now());
-        self.rate = config::get().pointer.spring();
-        let here = self.picked.map(|(p, _)| p);
-        let from = match self.picked {
-            Some((_, at)) => at,
-            None => match hypr::cursor_pos() {
-                Some(at) => at,
-                None => return false,
-            },
-        };
-        let all = self.boxed();
-        let mine = all
-            .iter()
-            .find(|(what, _, _)| here == Some(*what))
-            .map(|(_, _, r)| *r)
-            // Nothing picked yet, so the pointer itself is the box to go from.
-            .unwrap_or(Rect::new(from.0 as f32, from.1 as f32, 1.0, 1.0));
-        let targets: Vec<(Target, (f64, f64), Rect)> = all
-            .into_iter()
-            .filter(|&(what, _, _)| here != Some(what))
-            .collect();
-        let boxes: Vec<Rect> = targets.iter().map(|&(_, _, r)| r).collect();
-        let reach = config::get().pointer.reach_px;
-        let reach = if held { reach / 3.0 } else { reach };
-        match pull(mine, way, &boxes, reach, !held) {
-            Some(i) => {
-                let (what, at, _) = targets[i];
-                if std::env::var_os("WL_KEYS").is_some() {
-                    eprintln!("  hop {:?} -> ({:.0},{:.0})", way, at.0, at.1);
-                }
-                self.focus(what, at);
-                true
-            }
-            None => {
-                if std::env::var_os("WL_KEYS").is_some() {
-                    eprintln!("  hop {way:?} -> nothing");
-                }
-                false
-            }
-        }
-    }
-
-    /// Step again for any key still held down, quicker the longer it has
-    /// been held.
-    ///
-    /// A held key is asking to cover ground, and covering it a target at a
-    /// time keeps every landing on something. The alternative, letting the
-    /// pointer off its leash while the key is down, ends the journey wherever
-    /// the pointer happens to be when the key comes up, which is what made
-    /// letting go feel like the key was still down.
-    fn repeat_held(&mut self) {
-        for i in 0..4 {
-            let Some(since) = self.held[i] else { continue };
-            // A key held longer than anyone holds a key has not been let go
-            // of: the release was lost, and the pointer should stop.
-            if since.elapsed() > Duration::from_millis(4000) {
-                self.held[i] = None;
-                continue;
-            }
-            let cfg = &config::get().pointer;
-            let due = match self.steps[i] {
-                0 => cfg.repeat(),
-                n => cfg.again(n),
-            };
-            if since.elapsed() >= due {
-                self.steps[i] += 1;
-                self.held[i] = Some(Instant::now());
-                // The end of the run the key was walking: stop there rather
-                // than set off across the window.
-                if !self.hop(Self::WAYS[i], true) {
-                    self.held[i] = None;
-                }
-                // And keep the pointer up with the key. A step that takes
-                // longer than the wait between steps leaves the pointer
-                // further behind with every one, and letting go then looks
-                // like the focus carrying on by itself while it catches up.
-                let next = self.steps[i];
-                let wait = config::get().pointer.again(next).as_secs_f64();
-                self.rate = self.rate.max(4.6 / (wait * 1.15).max(0.02));
-            }
-        }
+        matches!(self.stage, Stage::PickHint { .. })
+            && self
+                .navigating
+                .is_some_and(|t| t.elapsed() < config::get().label.wake())
     }
 
     /// Whatever the pointer is nearest, and how far off it is.
@@ -1378,20 +2211,57 @@ impl App {
             .min_by(|a, b| a.2.total_cmp(&b.2))
     }
 
-    /// Light up whatever the pointer is nearest now, and while it is being
-    /// flown, pick it too: there is no target waiting at the end of the trip,
-    /// so what it is over is what a click would take.
-    fn light_up(&mut self, at: (f64, f64)) {
+    /// Follow whatever the pointer is nearest now without forcing a full
+    /// overlay redraw. The small pointer subsurface provides the live visual.
+    fn follow_pointer(&mut self, at: (f64, f64)) -> bool {
         let Some((what, _, _)) = self.nearest(at) else {
-            return;
+            return false;
         };
-        if Some(what) != self.lit {
-            if std::env::var_os("WL_KEYS").is_some() {
-                eprintln!("    lit -> {what:?} at ({:.0},{:.0})", at.0, at.1);
-            }
-            self.lit = Some(what);
+        if self.free {
+            // The anchor is highlighted as a landing aid, but the click stays
+            // at the freely moved pointer until the anchor actually catches
+            // it.
+            self.picked = Some((what, at));
+        }
+        if Some(what) == self.lit {
+            return false;
+        }
+        if std::env::var_os("WL_KEYS").is_some() {
+            eprintln!("    lit -> {what:?} at ({:.0},{:.0})", at.0, at.1);
+        }
+        self.lit = Some(what);
+        true
+    }
+
+    /// Update the nearest target and make that state visible on the next
+    /// full overlay frame.
+    fn light_up(&mut self, at: (f64, f64)) {
+        if self.follow_pointer(at) {
             self.dirty = true;
         }
+    }
+
+    /// Finish a magnetic catch exactly on its anchor.
+    fn land(&mut self, at: (f64, f64)) {
+        if let Some((what, where_, _)) = self.nearest(at) {
+            self.land_target(what, where_);
+            return;
+        }
+        self.pointer = Some(at);
+        self.free = false;
+        self.show_pointer_indicator(false);
+        self.show_anchor_indicator(false);
+        self.dirty = true;
+    }
+
+    fn land_target(&mut self, what: Target, at: (f64, f64)) {
+        self.picked = Some((what, at));
+        self.lit = Some(what);
+        self.pointer = Some(at);
+        self.free = false;
+        self.show_pointer_indicator(false);
+        self.show_anchor_indicator(false);
+        self.dirty = true;
     }
 
     /// Start on whatever the pointer is already nearest, so the arrow keys
@@ -1466,6 +2336,14 @@ impl App {
         self.typed.clear();
         self.armed = None;
         self.picked = None;
+        self.arrows.clear();
+        self.aim = None;
+        self.stop_motion = true;
+        self.free = false;
+        self.show_pointer_indicator(false);
+        self.show_anchor_indicator(false);
+        self.navigating = None;
+        self.navigation_buffer = None;
         // Hints are about to be rebuilt in some of the ways here, and what
         // was lit was an index into the old ones.
         self.lit = None;
@@ -1520,18 +2398,10 @@ impl App {
         let Some(win) = self.pending_pick.take() else {
             return;
         };
-        if !self.elements_cache.contains_key(&win) {
-            let query = match self.query.take() {
-                Some(q) if q.win == win => q,
-                other => {
-                    self.query = other;
-                    Query::start(&self.snap, win)
-                }
-            };
-            let els = query.take();
-            self.elements_cache.insert(win, els);
-        }
+        self.load_elements(win, false);
         if self.elements_cache.get(&win).is_none_or(Vec::is_empty) {
+            self.hints.clear();
+            self.watch = None;
             self.stage = Stage::PickTile { win };
             self.reset_input();
         } else {
@@ -1540,7 +2410,29 @@ impl App {
         self.focus_nearest_cursor();
     }
 
+    fn load_elements(&mut self, win: usize, refresh: bool) {
+        if refresh {
+            self.elements_cache.remove(&win);
+        }
+        if self.elements_cache.contains_key(&win) {
+            return;
+        }
+        let query = match self.query.take() {
+            Some(q) if q.win == win => q,
+            other => {
+                self.query = other;
+                Query::start(&self.snap, win)
+            }
+        };
+        self.elements_cache.insert(win, query.take());
+    }
+
     fn enter_hint_stage(&mut self, win: usize) {
+        self.install_hint_stage(win);
+        self.reset_input();
+    }
+
+    fn install_hint_stage(&mut self, win: usize) {
         let els = self.elements_cache.get(&win).cloned().unwrap_or_default();
         // Watch something inside the document, since that is the part that
         // moves, and the one nearest the middle of the window, since that is
@@ -1557,13 +2449,42 @@ impl App {
             .and_then(atspi::watch_bounds);
         self.hints = hints_for(w, &els);
         self.stage = Stage::PickHint { win };
-        self.reset_input();
+    }
+
+    /// Replace the label frame with the already-rendered anchor frame. The
+    /// only work on the input edge is a buffer attach and a surface commit.
+    fn show_navigation_frame(&mut self) -> bool {
+        if self.showed_dots {
+            return true;
+        }
+        let scale = self.buffer_scale;
+        let bw = self.width as i32 * scale;
+        let bh = self.height as i32 * scale;
+        let usable = self
+            .navigation_buffer
+            .as_ref()
+            .is_some_and(|buffer| buffer.height() == bh && buffer.stride() == bw * 4);
+        if !usable {
+            self.navigation_buffer = None;
+            return false;
+        }
+        let attached = self
+            .navigation_buffer
+            .as_ref()
+            .is_some_and(|buffer| self.attach_frame(buffer));
+        if !attached {
+            self.navigation_buffer = None;
+            return false;
+        }
+        self.showed_dots = true;
+        self.dirty = false;
+        true
     }
 
     fn draw(&mut self) {
         self.dirty = false;
         let dots = self.dots();
-        self.showed_dots = dots;
+        let previously_showed_dots = self.showed_dots;
         // Worked out before the buffer is borrowed, since it reads the hints
         // and the snapshot that the borrow would tie up.
         let charge = self
@@ -1582,14 +2503,36 @@ impl App {
                 );
                 Some((rect, c.at()))
             });
-        let Some(layer) = self.layer.as_ref() else {
+        let Some(buffer) = self.render_frame(dots, charge) else {
             return;
         };
+        if !self.attach_frame(&buffer) {
+            return;
+        }
+        self.showed_dots = dots;
+
+        // Keep an unused compact frame across normal redraws such as click
+        // charge animation. If it was just on screen, replace it: the old
+        // slot may remain active until the compositor sees this commit.
+        if dots {
+            self.navigation_buffer = None;
+        } else if matches!(self.stage, Stage::PickHint { .. })
+            && (previously_showed_dots || self.navigation_buffer.is_none())
+        {
+            self.navigation_buffer = None;
+            self.navigation_buffer = self.render_frame(true, None);
+        }
+    }
+
+    /// Paint one complete parent frame without attaching it. Normal draws
+    /// attach the label frame and retain the compact frame for the next arrow
+    /// press.
+    fn render_frame(&mut self, dots: bool, charge: Option<(Rect, (u32, f32))>) -> Option<Buffer> {
         let scale = self.buffer_scale;
         let bw = self.width as i32 * scale;
         let bh = self.height as i32 * scale;
         if bw <= 0 || bh <= 0 {
-            return;
+            return None;
         }
         let (buffer, buf) = match self
             .pool
@@ -1598,7 +2541,7 @@ impl App {
             Ok(v) => v,
             Err(e) => {
                 eprintln!("buffer allocation failed: {e}");
-                return;
+                return None;
             }
         };
         let mut canvas = Canvas { buf, w: bw, h: bh };
@@ -1610,20 +2553,46 @@ impl App {
                     Some(Target::Tile(ch)) => Some(ch),
                     _ => self.armed,
                 };
-                draw_pick_tile(&self.snap, win, lit, &self.font, &mut canvas, scale)
+                let pointer = self
+                    .pointer_overlay
+                    .is_none()
+                    .then_some(self.pointer)
+                    .flatten()
+                    .filter(|_| self.free);
+                draw_pick_tile(
+                    &self.snap,
+                    win,
+                    lit,
+                    pointer,
+                    &self.font,
+                    &mut canvas,
+                    scale,
+                )
             }
             Stage::PickHint { win } => {
                 let view = HintView {
                     hints: &self.hints,
                     typed: &self.typed,
                     armed: self.armed,
-                    picked: match self.lit {
-                        Some(Target::Hint(i)) => Some(i),
-                        _ => None,
+                    // The moving ring and blue nearest-anchor subsurface are
+                    // live. Keeping every compact anchor red makes this
+                    // cached frame independent of selection changes.
+                    picked: if dots {
+                        None
+                    } else {
+                        match self.lit {
+                            Some(Target::Hint(i)) => Some(i),
+                            _ => None,
+                        }
                     },
                     stale: self.settle.is_some(),
                     dots,
-                    pointer: self.pointer,
+                    pointer: self
+                        .pointer_overlay
+                        .is_none()
+                        .then_some(self.pointer)
+                        .flatten()
+                        .filter(|_| self.free),
                 };
                 draw_pick_hint(&self.snap, win, view, &self.font, &mut canvas, scale)
             }
@@ -1631,110 +2600,26 @@ impl App {
         if let Some((rect, at)) = charge {
             draw_charge(&mut canvas, rect, at, &self.font, scale as f32);
         }
+        Some(buffer)
+    }
+
+    fn attach_frame(&self, buffer: &Buffer) -> bool {
+        let Some(layer) = self.layer.as_ref() else {
+            return false;
+        };
+        let scale = self.buffer_scale;
+        let bw = self.width as i32 * scale;
+        let bh = self.height as i32 * scale;
         let surface = layer.wl_surface();
         surface.set_buffer_scale(scale);
         if buffer.attach_to(surface).is_err() {
             eprintln!("failed to attach buffer");
-            return;
+            return false;
         }
         surface.damage_buffer(0, 0, bw, bh);
         surface.commit();
+        true
     }
-}
-
-/// Which of these points a step in a direction should land on.
-///
-/// Whichever pulls hardest, which is mostly whichever is nearest: a step is
-/// meant to land on the next thing over, and ranking by how well something
-/// lines up is what reaches past three of them for a fourth. Being off the
-/// line counts against a target too, enough to keep a row or a column
-/// reading straight when the choice is otherwise close.
-///
-/// Nothing further off than `reach` counts at all. Every layout has edges,
-/// and at one of them the next thing that way can be the far side of the
-/// window: answering a press meaning "the next one down" with a jump across
-/// the screen is worse than answering it with nothing, and holding the key
-/// flies there under your own hand anyway.
-fn pull(
-    from: Rect,
-    (dx, dy): (f64, f64),
-    boxes: &[Rect],
-    reach: f64,
-    wander: bool,
-) -> Option<usize> {
-    /// What a pixel to the side costs, against a pixel of the way there.
-    const ACROSS: f64 = 2.0;
-    /// How far to the side is still that way at all: a fixed allowance for
-    /// near neighbours, and a share of the distance for far ones.
-    const SPREAD: (f64, f64) = (40.0, 0.3);
-
-    // How far apart two spans are, and nothing if they overlap: two boxes
-    // that share any of the same rows are on the same line as far as a press
-    // to the side is concerned, however wide either of them is.
-    let gap = |(a0, a1): (f64, f64), (b0, b1): (f64, f64)| (b0 - a1).max(a0 - b1).max(0.0);
-    let span = |r: &Rect, across: bool| match across {
-        // The axis the press is not along.
-        true if dx != 0.0 => (r.y as f64, (r.y + r.h) as f64),
-        true => (r.x as f64, (r.x + r.w) as f64),
-        false if dx != 0.0 => (r.x as f64, (r.x + r.w) as f64),
-        false => (r.y as f64, (r.y + r.h) as f64),
-    };
-    // That way means starting further that way, by the edge nearest the
-    // press and not by the middle. A label and the field beside it are a row
-    // apart in their middles and a hand's width apart in their edges: going
-    // by middles, the label below wins a press of right, which is how right
-    // ends up meaning down.
-    let edge = |r: &Rect| match (dx > 0.0, dy > 0.0, dx != 0.0) {
-        (true, _, true) => r.x as f64,
-        (false, _, true) => -((r.x + r.w) as f64),
-        (_, true, false) => r.y as f64,
-        (_, false, false) => -((r.y + r.h) as f64),
-    };
-    let ahead = |r: &Rect| edge(r) >= edge(&from) + 4.0;
-
-    let best = boxes
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| {
-            let along = gap(span(&from, false), span(r, false));
-            let across = gap(span(&from, true), span(r, true));
-            let allowed = SPREAD.0 + SPREAD.1 * along;
-            (ahead(r) && across <= allowed && along <= reach)
-                .then_some((along + ACROSS * across, i))
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, i)| i);
-    if best.is_some() || dx != 0.0 || !wander {
-        return best;
-    }
-
-    // Nothing below, or above, that is also in line. In a paragraph that is
-    // the usual case rather than the odd one: the links are wherever the
-    // words fell, so the one on the next line is rarely under the one on
-    // this line, and a rule about being in line has down doing nothing at
-    // all. What down means there is the next one along, so take that: the
-    // first thing on a later line, reading the way the text does.
-    let (top, bottom) = (from.y as f64, (from.y + from.h) as f64);
-    boxes
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| {
-            let (rt, rb) = (r.y as f64, (r.y + r.h) as f64);
-            match dy > 0.0 {
-                true => rt >= bottom - 1.0 && rt - bottom <= reach,
-                false => rb <= top + 1.0 && top - rb <= reach,
-            }
-        })
-        .min_by(|(_, a), (_, b)| {
-            let key = |r: &Rect| match dy > 0.0 {
-                true => (r.y as f64, r.x as f64),
-                // Reading backwards: the last thing on the line above.
-                false => (-(r.y + r.h) as f64, -(r.x + r.w) as f64),
-            };
-            let (a, b) = (key(a), key(b));
-            a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
-        })
-        .map(|(i, _)| i)
 }
 
 /// Label a window's elements and place them in global coordinates.
@@ -1816,7 +2701,7 @@ pub fn render(
         }
     };
     if els.is_empty() {
-        draw_pick_tile(snap, win, armed, &font, &mut canvas, scale);
+        draw_pick_tile(snap, win, armed, None, &font, &mut canvas, scale);
         // A whole tile letter is a tile picked out, the same as a whole label.
         if let Some(t) = keys.chars().next().filter(|_| keys.chars().count() == 1) {
             if let Some(tile) = grid::tile_for(w.w as f64, w.h as f64, t) {
@@ -1914,6 +2799,7 @@ fn draw_pick_tile(
     snap: &Snapshot,
     win: usize,
     armed: Option<char>,
+    pointer: Option<(f64, f64)>,
     font: &Font,
     canvas: &mut Canvas,
     scale: i32,
@@ -1972,6 +2858,41 @@ fn draw_pick_tile(
         );
         canvas.text_centered(font, &letter, cx, cy, px, *config::get().colors.text);
     }
+    if let Some(at) = pointer {
+        draw_pointer(snap, at, canvas, scale);
+    }
+}
+
+/// The freely moving focus shown during arrow input and magnetic settling.
+fn draw_pointer(snap: &Snapshot, (px, py): (f64, f64), canvas: &mut Canvas, scale: i32) {
+    let mon = &snap.monitor;
+    let cx = ((px - mon.x as f64) * scale as f64) as f32;
+    let cy = ((py - mon.y as f64) * scale as f64) as f32;
+    draw_pointer_mark(canvas, cx, cy, scale);
+}
+
+fn draw_pointer_mark(canvas: &mut Canvas, cx: f32, cy: f32, scale: i32) {
+    let s = scale as f32;
+    let d = 13.0 * s;
+    let spot = Rect::new(cx - d / 2.0, cy - d / 2.0, d, d);
+    let glow = *config::get().colors.ring;
+    canvas.round_rect_shadow(spot.grow(2.0 * s), d, 9.0 * s, glow.fade(0.42));
+    canvas.round_rect_outline(spot, d / 2.0, 2.0 * s, glow);
+}
+
+fn draw_nearest_anchor_mark(canvas: &mut Canvas, cx: f32, cy: f32, scale: i32) {
+    let s = scale as f32;
+    let d = 9.0 * s;
+    let spot = Rect::new(cx - d / 2.0, cy - d / 2.0, d, d);
+    let colour = *config::get().colors.nearest_dot;
+    canvas.round_rect_shadow(
+        spot,
+        d / 2.0,
+        3.0 * s,
+        shade(*config::get().colors.shadow, 0.8),
+    );
+    canvas.round_rect(spot, d / 2.0, colour);
+    canvas.round_rect_shadow(spot.grow(2.0 * s), d, 7.0 * s, colour.fade(0.5));
 }
 
 /// Where a label sits on screen: buffer pixels, already clamped to the
@@ -2125,7 +3046,7 @@ struct HintView<'a> {
     /// back is two flinches where fading is none, and the fade says by itself
     /// that they are not to be typed yet.
     stale: bool,
-    /// The arrows are stepping, so the labels give way to a dot apiece.
+    /// The compact fallback replaces labels with one dot per anchor.
     dots: bool,
     /// Where the pointer is, when it is worth drawing: on its way somewhere.
     pointer: Option<(f64, f64)>,
@@ -2169,9 +3090,8 @@ fn draw_pick_hint(
     let s = scale as f32;
     let px = config::get().label.size * s;
     // The outline around the window is a long perimeter to measure, and it
-    // says which window is being worked on. While stepping that is settled
-    // and the frame wants to be cheap, since it is drawn every step of the
-    // way.
+    // says which window is being worked on. The compact view omits it because
+    // the moving focus ring already supplies the live location.
     if !dots {
         canvas.round_rect_outline(
             Rect::new(
@@ -2186,24 +3106,9 @@ fn draw_pick_hint(
             *config::get().colors.tile_border,
         );
     }
-    // Stepping with the arrows: a dot on each target and nothing else, so
+    // Moving with the arrows: a dot on each target and nothing else, so
     // that the one being moved between them is the thing on screen.
     if dots {
-        // Where the pointer is at this instant, drawn as the thing that
-        // moves. The dots stay put; this slides between them, and watching
-        // it is how the movement reads as movement.
-        if let Some((px, py)) = pointer {
-            let d = 13.0 * s;
-            let spot = Rect::new(
-                ((px - mon.x as f64) * scale as f64) as f32 - d / 2.0,
-                ((py - mon.y as f64) * scale as f64) as f32 - d / 2.0,
-                d,
-                d,
-            );
-            let glow = *config::get().colors.ring;
-            canvas.round_rect_shadow(spot.grow(2.0 * s), d, 9.0 * s, glow.fade(0.42));
-            canvas.round_rect_outline(spot, d / 2.0, 2.0 * s, glow);
-        }
         for (i, h) in hints.iter().enumerate() {
             let hot = picked == Some(i);
             let d = (if hot { 9.0 } else { 6.0 }) * s;
@@ -2220,13 +3125,16 @@ fn draw_pick_hint(
                 shade(*config::get().colors.shadow, 0.8),
             );
             let colour = match hot {
-                true => *config::get().colors.ring,
+                true => *config::get().colors.nearest_dot,
                 false => *config::get().colors.dot,
             };
             canvas.round_rect(spot, d / 2.0, colour);
             if hot {
                 canvas.round_rect_shadow(spot.grow(2.0 * s), d, 7.0 * s, colour.fade(0.5));
             }
+        }
+        if let Some(at) = pointer {
+            draw_pointer(snap, at, canvas, scale);
         }
         return;
     }
@@ -2312,6 +3220,9 @@ fn draw_pick_hint(
                 s,
             );
         }
+    }
+    if let Some(at) = pointer {
+        draw_pointer(snap, at, canvas, scale);
     }
 }
 
@@ -2458,10 +3369,35 @@ fn draw_label_text(
     }
 }
 
+fn arrow_of(keysym: Keysym) -> Option<Arrow> {
+    match keysym {
+        Keysym::Left => Some(Arrow::Left),
+        Keysym::Right => Some(Arrow::Right),
+        Keysym::Up => Some(Arrow::Up),
+        Keysym::Down => Some(Arrow::Down),
+        _ => None,
+    }
+}
+
+fn mode_of(modifiers: Modifiers) -> NavMode {
+    if modifiers.ctrl {
+        NavMode::Instant
+    } else if modifiers.alt {
+        NavMode::Free
+    } else if modifiers.shift {
+        NavMode::Straight
+    } else {
+        NavMode::Normal
+    }
+}
+
 /// The key a wl_keyboard event stands for. Only used on the fallback path,
 /// where the overlay holds the keyboard itself.
-fn key_of(event: &KeyEvent) -> Option<Key> {
+fn key_of(event: &KeyEvent, modifiers: Modifiers) -> Option<Key> {
     let cfg = &config::get().keys;
+    if let Some(way) = arrow_of(event.keysym) {
+        return Some(Key::Arrow(way, mode_of(modifiers)));
+    }
     match event.keysym {
         Keysym::Escape => return Some(Key::Escape),
         Keysym::BackSpace => return Some(Key::Backspace),
@@ -2522,15 +3458,11 @@ impl Dispatch<HyprlandGlobalShortcutV1, Key> for App {
     ) {
         match event {
             hyprland_global_shortcut_v1::Event::Pressed { .. } => {
-                if std::env::var_os("WL_KEYS").is_some() {
-                    eprintln!("KEY down {}", key.name());
-                }
+                state.trace_key("down", *key);
                 state.press(*key)
             }
             hyprland_global_shortcut_v1::Event::Released { .. } => {
-                if std::env::var_os("WL_KEYS").is_some() {
-                    eprintln!("KEY up   {}", key.name());
-                }
+                state.trace_key("up", *key);
                 state.release(*key)
             }
         }
@@ -2663,7 +3595,7 @@ impl KeyboardHandler for App {
         _: u32,
         event: KeyEvent,
     ) {
-        if let Some(key) = key_of(&event) {
+        if let Some(key) = key_of(&event, self.keyboard_modifiers) {
             self.press(key);
         }
     }
@@ -2675,7 +3607,9 @@ impl KeyboardHandler for App {
         _: u32,
         event: KeyEvent,
     ) {
-        if let Some(key) = key_of(&event) {
+        if let Some(way) = arrow_of(event.keysym) {
+            self.arrows.release_any(way.index(), Instant::now());
+        } else if let Some(key) = key_of(&event, self.keyboard_modifiers) {
             self.release(key);
         }
     }
@@ -2685,9 +3619,10 @@ impl KeyboardHandler for App {
         _: &QueueHandle<Self>,
         _: &wl_keyboard::WlKeyboard,
         _: u32,
-        _: Modifiers,
+        modifiers: Modifiers,
         _: u32,
     ) {
+        self.keyboard_modifiers = modifiers;
     }
 }
 
@@ -2711,6 +3646,7 @@ delegate_seat!(App);
 delegate_keyboard!(App);
 delegate_layer!(App);
 delegate_registry!(App);
+delegate_subcompositor!(App);
 wayland_client::delegate_noop!(App: ignore wl_region::WlRegion);
 wayland_client::delegate_noop!(App: ignore HyprlandGlobalShortcutsManagerV1);
 wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerManagerV1);
@@ -2718,34 +3654,32 @@ wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerV1);
 
 #[cfg(test)]
 mod tests {
-    use super::{config, pull, Drift, Rect};
+    use super::{
+        arrow_direction, config, constrain_to_window, mode_of, pull, Arrow, ArrowKeys, Drift,
+        Drill, Key, Modifiers, NavMode, Rect,
+    };
+    use std::time::{Duration, Instant};
 
-    /// The pull a step is given when nothing is hurrying it along.
     fn rate() -> f64 {
         config::get().pointer.spring()
     }
 
-    const RIGHTWARD: (f64, f64) = (1.0, 0.0);
-    const DOWNWARD: (f64, f64) = (0.0, 1.0);
-    const REACH: f64 = 500.0;
+    const RIGHT: (f64, f64) = (1.0, 0.0);
+    const NONE: (f64, f64) = (0.0, 0.0);
     /// Somewhere for the pointer to run out of, well past anywhere these
     /// tests send it.
     const WALL: (f64, f64) = (10_000.0, 10_000.0);
 
-    fn at(x: f32, y: f32, w: f32, h: f32) -> Rect {
-        Rect::new(x, y, w, h)
-    }
-
-    /// Step to a target and watch the pointer get there: how long until it
-    /// has covered all but a twentieth of the way, how long until it settles,
-    /// and how far past the target it went.
+    /// Pull toward a named target and watch the pointer get there: how long
+    /// until it has covered all but a twentieth of the way, how long until it
+    /// settles, and how far past the target it went.
     fn travel(from: (f64, f64), to: (f64, f64)) -> (u32, u32, f64) {
-        let mut d = Drift::new(from, to, rate());
+        let mut d = Drift::toward(from, to, rate());
         let span = to.0 - from.0;
         let (mut ticks, mut mostly, mut furthest) = (0u32, 0u32, 0.0f64);
         for _ in 0..400 {
             ticks += 1;
-            let done = d.advance(0.008, WALL);
+            let done = d.advance(0.008, NONE, &[], WALL);
             if mostly == 0 && (d.at.0 - from.0).abs() >= span.abs() * 0.95 {
                 mostly = ticks;
             }
@@ -2758,13 +3692,280 @@ mod tests {
     }
 
     #[test]
-    fn a_list_of_links_is_a_column_however_long_the_links_are() {
-        // What a real page looks like: rows eighteen apart, left aligned,
-        // and so wide apart in the middle that going by middles has them in
-        // different columns and stepping down stops working altogether.
+    fn two_arrows_are_one_direction_without_extra_speed() {
+        let diagonal = arrow_direction([false, true, false, true]);
+        assert!((diagonal.0 - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-9);
+        assert!((diagonal.1 - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-9);
+        assert!((diagonal.0.hypot(diagonal.1) - 1.0).abs() < 1e-9);
+        assert_eq!(
+            arrow_direction([true, true, true, true]),
+            NONE,
+            "opposite keys did not cancel"
+        );
+        assert_eq!(
+            arrow_direction([false; 4]),
+            NONE,
+            "the chord kept moving after every key was released"
+        );
+    }
+
+    #[test]
+    fn a_partial_chord_release_keeps_the_other_axis() {
+        let start = Instant::now();
+        let mut arrows = ArrowKeys::default();
+        arrows.set(1, NavMode::Normal, true, start);
+        arrows.set(3, NavMode::Normal, true, start);
+        assert_ne!(arrows.motion(start).0, NONE);
+
+        arrows.set(1, NavMode::Normal, false, start + Duration::from_millis(10));
+        assert_eq!(
+            arrows.motion(start + Duration::from_millis(20)).0,
+            (0.0, 1.0),
+            "releasing right did not leave down held"
+        );
+        assert!(arrows.any(), "the remaining held key was cleared");
+        arrows.set(3, NavMode::Normal, false, start + Duration::from_millis(25));
+        assert_eq!(
+            arrows.motion(start + Duration::from_millis(100)).0,
+            NONE,
+            "the chord kept pushing after both releases"
+        );
+    }
+
+    #[test]
+    fn a_chord_expires_when_every_release_event_is_lost() {
+        let start = Instant::now();
+        let mut arrows = ArrowKeys::default();
+        arrows.set(1, NavMode::Normal, true, start);
+        arrows.set(3, NavMode::Normal, true, start + Duration::from_millis(10));
+
+        // Hyprland repeats only the last key in a chord. That pulse keeps the
+        // whole direction alive while the physical chord is still held.
+        arrows.set(3, NavMode::Normal, true, start + Duration::from_millis(600));
+        assert_ne!(arrows.motion(start + Duration::from_millis(700)).0, NONE);
+
+        // Releasing either physical key stops Hyprland's repeat timer even
+        // if neither global-shortcut release reaches the client.
+        assert_eq!(
+            arrows.motion(start + Duration::from_millis(721)).0,
+            NONE,
+            "repeat pulses stopped but the chord kept pushing"
+        );
+        assert!(!arrows.any());
+    }
+
+    #[test]
+    fn a_drill_can_reproduce_an_arrow_chord() {
+        let drill = Drill::parse("down+right:250 wait:40").unwrap();
+        assert_eq!(
+            drill.steps[0].0,
+            vec![
+                Key::Arrow(Arrow::Down, NavMode::Normal),
+                Key::Arrow(Arrow::Right, NavMode::Normal),
+            ]
+        );
+        assert!(drill.steps[1].0.is_empty());
+    }
+
+    #[test]
+    fn a_drill_can_select_each_modifier_mode() {
+        let drill = Drill::parse("straight-right free-down instant-left").unwrap();
+        assert_eq!(
+            drill
+                .steps
+                .into_iter()
+                .map(|(keys, _)| keys[0])
+                .collect::<Vec<_>>(),
+            vec![
+                Key::Arrow(Arrow::Right, NavMode::Straight),
+                Key::Arrow(Arrow::Down, NavMode::Free),
+                Key::Arrow(Arrow::Left, NavMode::Instant),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_late_release_cannot_cancel_a_new_modifier_mode() {
+        let start = Instant::now();
+        let mut arrows = ArrowKeys::default();
+        arrows.set(1, NavMode::Straight, true, start);
+        arrows.set(1, NavMode::Free, true, start + Duration::from_millis(10));
+        arrows.set(
+            1,
+            NavMode::Straight,
+            false,
+            start + Duration::from_millis(20),
+        );
+        assert_eq!(
+            arrows.motion(start + Duration::from_millis(30)),
+            (RIGHT, NavMode::Free)
+        );
+    }
+
+    #[test]
+    fn fallback_modifier_precedence_matches_the_shortcuts() {
+        assert_eq!(
+            mode_of(Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            }),
+            NavMode::Straight
+        );
+        assert_eq!(
+            mode_of(Modifiers {
+                shift: true,
+                alt: true,
+                ..Modifiers::default()
+            }),
+            NavMode::Free
+        );
+        assert_eq!(
+            mode_of(Modifiers {
+                ctrl: true,
+                alt: true,
+                shift: true,
+                ..Modifiers::default()
+            }),
+            NavMode::Instant
+        );
+    }
+
+    #[test]
+    fn cardinal_and_diagonal_holds_reach_the_same_speed() {
+        let diagonal = arrow_direction([false, true, false, true]);
+        let mut straight = Drift::free((1000.0, 1000.0));
+        let mut corner = Drift::free((1000.0, 1000.0));
+        for _ in 0..150 {
+            straight.advance(0.008, RIGHT, &[], WALL);
+            corner.advance(0.008, diagonal, &[], WALL);
+        }
+        assert!((straight.speed() - corner.speed()).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_tap_nudges_and_a_hold_builds_speed() {
+        let fly = |push_ticks: usize| {
+            let mut d = Drift::free((1000.0, 1000.0));
+            for _ in 0..push_ticks {
+                d.advance(0.008, RIGHT, &[], WALL);
+            }
+            let pushed = d.at.0;
+            for _ in 0..150 {
+                if d.advance(0.008, NONE, &[], WALL) {
+                    break;
+                }
+            }
+            (pushed - 1000.0, d.at.0 - 1000.0)
+        };
+        let (tap, coast) = fly(8);
+        assert!((2.0..12.0).contains(&tap), "a tap pushed {tap:.0}px");
+        assert!(coast > tap + 5.0, "a tap had no inertia: {coast:.0}px");
+        let (released, held) = fly(125);
+        assert!(held > 700.0, "a one second hold moved only {held:.0}px");
+        let inertia = held - released;
+        assert!(
+            (20.0..90.0).contains(&inertia),
+            "release coast ran {inertia:.0}px"
+        );
+    }
+
+    #[test]
+    fn a_fresh_arrow_starts_below_full_acceleration() {
+        let mut fresh = Drift::free((1000.0, 1000.0));
+        let mut mature = Drift::free((1000.0, 1000.0));
+        let launch = config::get().pointer.launch_speed_px;
+        fresh.vel = (launch, 0.0);
+        mature.vel = (launch, 0.0);
+        mature.push_age = config::get().pointer.ramp_ms as f64 / 1000.0;
+
+        fresh.advance(0.008, RIGHT, &[], WALL);
+        mature.advance(0.008, RIGHT, &[], WALL);
+
+        let fraction = (fresh.speed() - launch) / (mature.speed() - launch);
+        assert!(
+            (0.31..0.34).contains(&fraction),
+            "fresh gained {:.0}px/s, mature gained {:.0}px/s ({fraction:.2})",
+            fresh.speed() - launch,
+            mature.speed() - launch
+        );
+        fresh.advance(0.008, NONE, &[], WALL);
+        assert_eq!(fresh.push_age, 0.0, "release did not reset the ramp");
+    }
+
+    #[test]
+    fn even_one_motion_frame_gets_a_small_launch_velocity() {
+        let mut d = Drift::free((1000.0, 1000.0));
+        let launch = config::get().pointer.launch_speed_px;
+
+        d.advance(0.008, RIGHT, &[], WALL);
+
+        assert!(d.speed() >= launch, "launch was only {:.1}px/s", d.speed());
+        assert!(
+            d.at.0 - 1000.0 < 1.0,
+            "minimum launch moved too far for precise control"
+        );
+    }
+
+    #[test]
+    fn an_anchor_bends_a_moving_path() {
+        let anchor = (500.0, 500.0);
+        let mut attracted = Drift::free((450.0, 470.0));
+        let mut plain = Drift::free((450.0, 470.0));
+        attracted.vel = (250.0, 0.0);
+        plain.vel = attracted.vel;
+        for _ in 0..20 {
+            attracted.advance(0.008, NONE, &[anchor], WALL);
+            plain.advance(0.008, NONE, &[], WALL);
+        }
+        assert!(
+            attracted.at.1 > plain.at.1,
+            "the anchor did not bend the moving path"
+        );
+    }
+
+    #[test]
+    fn shift_motion_stays_on_its_input_line() {
+        let mut d = Drift::free((450.0, 470.0));
+        let anchor = (500.0, 500.0);
+        for _ in 0..50 {
+            d.advance_as(0.008, RIGHT, NavMode::Straight, &[anchor], WALL);
+        }
+        assert_eq!(d.at.1, 470.0, "straight mode bent toward an anchor");
+        assert_eq!(d.vel.1, 0.0, "straight mode gained sideways velocity");
+    }
+
+    #[test]
+    fn alt_motion_has_constant_speed_and_stops_where_released() {
+        let mut d = Drift::free((450.0, 500.0));
+        let anchor = (800.0, 600.0);
+        for _ in 0..20 {
+            d.advance_as(0.008, RIGHT, NavMode::Free, &[anchor], WALL);
+            assert!((d.speed() - config::get().pointer.direct_speed_px).abs() < 0.01);
+            assert_eq!(d.at.1, 500.0, "free mode was attracted sideways");
+        }
+        let released = d.at;
+        assert!(d.advance_as(0.008, NONE, NavMode::Normal, &[anchor], WALL));
+        assert_eq!(d.at, released);
+        assert_eq!(d.vel, NONE);
+        assert!(d.to.is_none() && d.magnet.is_none());
+    }
+
+    #[test]
+    fn instant_selection_prefers_the_next_box_in_a_row() {
+        let from = Rect::new(0.0, 0.0, 40.0, 20.0);
+        let boxes = [
+            Rect::new(300.0, 0.0, 40.0, 20.0),
+            Rect::new(80.0, 0.0, 40.0, 20.0),
+            Rect::new(80.0, 44.0, 40.0, 20.0),
+        ];
+        assert_eq!(pull(from, RIGHT, &boxes, f64::INFINITY, true), Some(1));
+    }
+
+    #[test]
+    fn instant_selection_treats_uneven_links_as_one_column() {
         let rows: Vec<Rect> = (0..6)
             .map(|i| {
-                at(
+                Rect::new(
                     645.0,
                     476.0 + i as f32 * 18.0,
                     120.0 + i as f32 * 60.0,
@@ -2773,47 +3974,242 @@ mod tests {
             })
             .collect();
         for i in 0..5 {
-            let rest: Vec<Rect> = rows[i + 1..].to_vec();
-            let next = pull(rows[i], DOWNWARD, &rest, REACH, true);
-            assert_eq!(next, Some(0), "row {i} did not step to the one below");
+            assert_eq!(
+                pull(rows[i], (0.0, 1.0), &rows[i + 1..], f64::INFINITY, true,),
+                Some(0),
+                "row {i} did not select the link below"
+            );
         }
     }
 
     #[test]
-    fn a_column_over_is_still_that_way() {
-        // Two columns of a page, four hundred pixels apart: far, but level
-        // and plainly to the right.
-        let left = at(215.0, 476.0, 145.0, 16.0);
-        let right = [at(645.0, 476.0, 119.0, 16.0), at(645.0, 800.0, 119.0, 16.0)];
-        assert_eq!(pull(left, RIGHTWARD, &right, REACH, true), Some(0));
+    fn instant_selection_never_jumps_behind_the_requested_direction() {
+        let from = Rect::new(600.0, 500.0, 80.0, 16.0);
+        let behind = [Rect::new(400.0, 500.0, 80.0, 16.0)];
+        assert_eq!(pull(from, RIGHT, &behind, f64::INFINITY, true), None);
     }
 
     #[test]
-    fn nothing_that_way_is_better_than_something_the_other_way() {
-        let from = at(600.0, 500.0, 80.0, 16.0);
-        // Up and to the right, at sixty degrees: not what right means.
-        let corner = [at(700.0, 300.0, 80.0, 16.0)];
-        assert_eq!(pull(from, RIGHTWARD, &corner, REACH, true), None);
-        // And nothing at all beyond arm's length.
-        let far = [at(1400.0, 500.0, 80.0, 16.0)];
-        assert_eq!(pull(from, RIGHTWARD, &far, 500.0, true), None);
-        assert_eq!(pull(from, RIGHTWARD, &far, 900.0, true), Some(0));
+    fn outward_motion_clamps_and_reports_window_edges() {
+        let mut at = (99.0, 99.0);
+        let mut vel = (200.0, 200.0);
+        let hit = constrain_to_window(
+            &mut at,
+            &mut vel,
+            arrow_direction([false, true, false, true]),
+            (0.0, 0.0, 100.0, 100.0),
+        );
+        assert_eq!(hit, vec![Arrow::Right, Arrow::Down]);
+        assert_eq!(at, (97.0, 97.0));
+        assert_eq!(vel, NONE);
     }
 
     #[test]
-    fn the_nearest_one_that_way_wins() {
-        let from = at(0.0, 0.0, 40.0, 20.0);
-        let boxes = [
-            at(300.0, 0.0, 40.0, 20.0),
-            at(80.0, 0.0, 40.0, 20.0),
-            at(80.0, 44.0, 40.0, 20.0),
-        ];
-        assert_eq!(pull(from, RIGHTWARD, &boxes, REACH, true), Some(1));
-        assert_eq!(pull(from, DOWNWARD, &boxes, REACH, true), Some(2));
+    fn a_released_pointer_inside_the_snap_radius_lands_exactly() {
+        let anchor = (500.0, 500.0);
+        let mut d = Drift::free((493.0, 500.0));
+        let mut done = false;
+        for _ in 0..400 {
+            done = d.advance(0.008, NONE, &[anchor], WALL);
+            if done {
+                break;
+            }
+        }
+        assert!(done, "the anchor never caught the pointer");
+        assert_eq!(d.at, anchor);
+        assert_eq!(d.vel, NONE);
     }
 
     #[test]
-    fn a_step_eases_in_and_out() {
+    fn released_speed_cannot_skip_the_snap_zone() {
+        let anchor = (500.0, 500.0);
+        let mut d = Drift::free((493.0, 500.0));
+        d.vel = (800.0, 0.0);
+
+        d.advance(0.008, NONE, &[anchor], WALL);
+
+        assert_eq!(d.to, Some(anchor));
+        assert!(d.magnet.is_none());
+    }
+
+    #[test]
+    fn attraction_keeps_pulling_below_the_idle_speed() {
+        let anchor = (500.0, 500.0);
+        let start = (460.0, 500.0);
+        let mut d = Drift::free(start);
+        let done = d.advance(0.008, NONE, &[anchor], WALL);
+        assert!(!done, "attraction stopped as if the pointer were idle");
+        assert_eq!(d.magnet, Some(anchor));
+        assert!(d.at.0 > start.0, "attraction did not move the pointer");
+        assert!(
+            d.to.is_none(),
+            "attraction skipped straight to the snap spring"
+        );
+    }
+
+    #[test]
+    fn release_chooses_the_anchor_nearest_the_coast_endpoint() {
+        let behind = (500.0, 500.0);
+        let ahead = (598.0, 500.0);
+        let mut d = Drift::free((522.0, 500.0));
+        d.vel = (456.0, 0.0);
+        d.ignore_departure(behind);
+
+        d.advance(0.008, NONE, &[behind, ahead], WALL);
+
+        assert_eq!(d.magnet, Some(ahead));
+        assert!(d.vel.0 > 0.0, "attraction reversed a rightward release");
+    }
+
+    #[test]
+    fn a_released_pointer_inside_attraction_lands_exactly() {
+        let anchor = (500.0, 500.0);
+        let mut d = Drift::free((440.0, 500.0));
+        let mut done = false;
+        for _ in 0..400 {
+            done = d.advance(0.008, NONE, &[anchor], WALL);
+            if done {
+                break;
+            }
+        }
+        assert!(done, "attraction never reached the snap zone");
+        assert_eq!(d.at, anchor);
+        assert_eq!(d.vel, NONE);
+    }
+
+    #[test]
+    fn distant_attraction_pulls_like_a_stretched_spring() {
+        let anchor = (500.0, 500.0);
+        let mut near = Drift::free((460.0, 500.0));
+        let mut far = Drift::free((100.0, 500.0));
+
+        near.advance(0.008, NONE, &[anchor], WALL);
+        far.advance(0.008, NONE, &[anchor], WALL);
+
+        assert!(
+            far.speed() > near.speed() * 6.0,
+            "far pull {:.1}px/s was too close to near pull {:.1}px/s",
+            far.speed(),
+            near.speed()
+        );
+    }
+
+    #[test]
+    fn released_motion_outside_the_softness_radius_still_lands() {
+        let anchor = (800.0, 500.0);
+        let farther = (1200.0, 500.0);
+        let mut d = Drift::free((400.0, 500.0));
+        for _ in 0..8 {
+            d.advance(0.008, RIGHT, &[farther, anchor], WALL);
+        }
+        d.advance(0.008, NONE, &[farther, anchor], WALL);
+        assert_eq!(d.magnet, Some(anchor), "release chose a farther anchor");
+        let mut settle_ticks = 0;
+        for _ in 0..600 {
+            settle_ticks += 1;
+            if d.advance(0.008, NONE, &[farther, anchor], WALL) {
+                break;
+            }
+        }
+        assert!(
+            settle_ticks * 8 < 1200,
+            "distant attraction took {}ms",
+            settle_ticks * 8
+        );
+        assert_eq!(d.at, anchor, "distance disabled attraction");
+        assert_eq!(d.vel, NONE);
+    }
+
+    #[test]
+    fn a_short_release_near_an_anchor_settles_exactly() {
+        let anchor = (500.0, 500.0);
+        let mut d = Drift::free(anchor);
+        d.ignore_departure(anchor);
+        let mut furthest = d.at.0;
+        for _ in 0..8 {
+            d.advance(0.008, RIGHT, &[anchor], WALL);
+            furthest = furthest.max(d.at.0);
+        }
+        for _ in 0..400 {
+            if d.advance(0.008, NONE, &[anchor], WALL) {
+                break;
+            }
+            furthest = furthest.max(d.at.0);
+        }
+        assert!(
+            furthest > anchor.0 + 2.0,
+            "the arrow did not move before attraction took over"
+        );
+        assert_eq!(d.at, anchor, "the released pointer floated near its origin");
+    }
+
+    #[test]
+    fn a_short_tap_cannot_be_recaptured_by_its_departure_anchor() {
+        let origin = (500.0, 500.0);
+        let adjacent = (514.0, 500.0);
+        let mut d = Drift::free(origin);
+        d.ignore_departure(origin);
+
+        d.advance(0.008, RIGHT, &[origin, adjacent], WALL);
+        d.advance(0.008, NONE, &[origin, adjacent], WALL);
+
+        assert_eq!(d.ignore, Some(origin));
+        assert_eq!(d.magnet, Some(adjacent));
+        assert!(d.to.is_none(), "the departure anchor snapped the short tap");
+        for _ in 0..300 {
+            if d.advance(0.008, NONE, &[origin, adjacent], WALL) {
+                break;
+            }
+        }
+        assert_eq!(d.at, adjacent, "the short tap did not reach its neighbor");
+    }
+
+    #[test]
+    fn a_departure_anchor_returns_after_its_grace_period() {
+        let anchor = (500.0, 500.0);
+        let mut d = Drift::free(anchor);
+        d.ignore_departure(anchor);
+        let ticks = config::get().pointer.departure_ms / 8 + 2;
+        for _ in 0..ticks {
+            d.advance(0.008, RIGHT, &[anchor], WALL);
+        }
+        assert!(d.ignore.is_none(), "departure anchor grace did not expire");
+
+        d.at = (anchor.0 + 6.0, anchor.1);
+        d.vel = NONE;
+        for _ in 0..400 {
+            if d.advance(0.008, NONE, &[anchor], WALL) {
+                break;
+            }
+        }
+        assert_eq!(d.at, anchor, "returning pointer did not snap home");
+    }
+
+    #[test]
+    fn a_held_key_can_push_through_the_snap_radius() {
+        let anchor = (500.0, 500.0);
+        let mut d = Drift::free((450.0, 500.0));
+        for _ in 0..50 {
+            d.advance(0.008, RIGHT, &[anchor], WALL);
+        }
+        assert!(d.at.0 > anchor.0, "the anchor trapped a held key");
+        assert!(d.to.is_none(), "snapped while an arrow was still down");
+    }
+
+    #[test]
+    fn arrow_takeover_drops_cancelled_spring_velocity() {
+        let target = (500.0, 500.0);
+        let mut d = Drift::toward((400.0, 500.0), target, rate());
+        d.vel = (-700.0, 250.0);
+        d.release_target();
+        assert!(d.to.is_none());
+        assert_eq!(d.ignore, Some(target));
+        assert!(d.ignore_for > 0.0);
+        assert_eq!(d.vel, NONE);
+    }
+
+    #[test]
+    fn a_named_target_eases_in_and_out() {
         let (mostly, settled, past) = travel((0.0, 0.0), (300.0, 0.0));
         // Long enough to be a movement rather than a jump, short enough not
         // to be waited on.
@@ -2828,10 +4224,10 @@ mod tests {
     }
 
     #[test]
-    fn a_step_stops_at_the_edge_of_the_screen() {
-        let mut d = Drift::new((0.0, 0.0), (9000.0, 0.0), rate());
+    fn motion_stops_at_the_edge_of_the_screen() {
+        let mut d = Drift::toward((0.0, 0.0), (9000.0, 0.0), rate());
         for _ in 0..200 {
-            d.advance(0.008, (300.0, 300.0));
+            d.advance(0.008, NONE, &[], (300.0, 300.0));
         }
         assert_eq!(d.at.0, 300.0, "went past the edge");
         assert_eq!(d.vel.0, 0.0, "still carrying speed into the wall");

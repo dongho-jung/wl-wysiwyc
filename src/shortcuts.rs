@@ -35,6 +35,102 @@ use protocol::hyprland_global_shortcuts_manager_v1::HyprlandGlobalShortcutsManag
 /// that binds keys to them.
 pub const APP_ID: &str = "wl-wysiwyc";
 
+/// One of the four directions keyboard navigation can move.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Arrow {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Arrow {
+    pub const EVERY: [Arrow; 4] = [Arrow::Left, Arrow::Right, Arrow::Up, Arrow::Down];
+
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Left => 0,
+            Self::Right => 1,
+            Self::Up => 2,
+            Self::Down => 3,
+        }
+    }
+
+    pub(crate) fn vector(self) -> (f64, f64) {
+        match self {
+            Self::Left => (-1.0, 0.0),
+            Self::Right => (1.0, 0.0),
+            Self::Up => (0.0, -1.0),
+            Self::Down => (0.0, 1.0),
+        }
+    }
+
+    pub(crate) fn wheel(self) -> Wheel {
+        match self {
+            Self::Left => Wheel {
+                back: true,
+                far: false,
+                across: true,
+            },
+            Self::Right => Wheel {
+                back: false,
+                far: false,
+                across: true,
+            },
+            Self::Up => Wheel {
+                back: true,
+                far: false,
+                across: false,
+            },
+            Self::Down => Wheel {
+                back: false,
+                far: false,
+                across: false,
+            },
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+            Self::Up => "up",
+            Self::Down => "down",
+        }
+    }
+}
+
+/// How an arrow moves. The modifier is encoded in the compositor binding,
+/// so every mode arrives as its own shortcut without taking keyboard focus.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum NavMode {
+    #[default]
+    Normal,
+    Straight,
+    Free,
+    Instant,
+}
+
+impl NavMode {
+    fn modifiers(self) -> &'static [&'static str] {
+        match self {
+            Self::Normal => &[""],
+            Self::Straight => &["SHIFT"],
+            Self::Free => &["ALT", "SHIFT + ALT"],
+            Self::Instant => &["CTRL", "CTRL + SHIFT", "CTRL + ALT", "CTRL + SHIFT + ALT"],
+        }
+    }
+
+    fn id(self) -> &'static str {
+        match self {
+            Self::Normal => "",
+            Self::Straight => "straight-",
+            Self::Free => "free-",
+            Self::Instant => "instant-",
+        }
+    }
+}
+
 /// A key the overlay acts on, named the way both xkb and the tool see it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
@@ -48,13 +144,28 @@ pub enum Key {
     Reset,
     /// Swap element hints for the letter grid, and back.
     Switch,
-    /// Move the target to the nearest one that way.
-    Left,
-    Right,
-    Up,
-    Down,
+    /// Move the pointer in one of the four navigation modes.
+    Arrow(Arrow, NavMode),
     /// Scroll the window under the pointer.
     Scroll(Wheel),
+}
+
+impl Key {
+    pub(crate) fn is_arrow(self) -> bool {
+        matches!(self, Self::Arrow(..))
+    }
+
+    pub(crate) fn is_motion_arrow(self) -> bool {
+        matches!(self, Self::Arrow(_, mode) if mode != NavMode::Instant)
+    }
+
+    pub(crate) fn repeats(self) -> bool {
+        matches!(self, Self::Arrow(_, mode) if mode != NavMode::Instant)
+    }
+
+    pub(crate) fn transparent(self) -> bool {
+        self.is_arrow()
+    }
 }
 
 /// A scroll: which way, how far, and along which axis. Shift asks for the
@@ -119,6 +230,16 @@ impl Key {
     /// binding.
     pub fn bindings(self) -> Vec<String> {
         let keys = &crate::config::get().keys;
+        if let Key::Arrow(way, mode) = self {
+            return mode
+                .modifiers()
+                .iter()
+                .map(|modifier| match modifier.is_empty() {
+                    true => way.name().into(),
+                    false => format!("{modifier} + {}", way.name()),
+                })
+                .collect();
+        }
         if let Key::Scroll(w) = self {
             let key = match (w.back, keys.scroll_up(), keys.scroll_down()) {
                 (true, Some(k), _) | (false, _, Some(k)) => k,
@@ -149,9 +270,10 @@ impl Key {
             .collect()
     }
 
-    /// The shortcut id, which for everything but the click keys is also the
-    /// xkb key name the submap binds. A click key answering to several keys
-    /// is registered once, under the first of them.
+    /// The shortcut id. Plain keys use their xkb name, while modified arrows
+    /// carry their movement mode so each global shortcut remains distinct. A
+    /// click key answering to several keys is registered once, under the
+    /// first of them.
     pub fn name(self) -> String {
         let keys = &crate::config::get().keys;
         let first = |ks: Vec<String>| ks.into_iter().next().unwrap_or_default();
@@ -165,10 +287,7 @@ impl Key {
             Key::RightClick => first(keys.right()),
             Key::Reset => keys.reset().unwrap_or_default(),
             Key::Switch => keys.switch().unwrap_or_default(),
-            Key::Left => "left".into(),
-            Key::Right => "right".into(),
-            Key::Up => "up".into(),
-            Key::Down => "down".into(),
+            Key::Arrow(way, mode) => format!("{}{name}", mode.id(), name = way.name()),
             Key::Scroll(w) => match w.far {
                 true => format!("scroll-{}-far", w.way()),
                 false => format!("scroll-{}", w.way()),
@@ -192,11 +311,21 @@ pub fn keys() -> Vec<Key> {
         Key::Escape,
         Key::Backspace,
         Key::Tab,
-        Key::Left,
-        Key::Right,
-        Key::Up,
-        Key::Down,
     ];
+    out.extend(
+        [
+            NavMode::Normal,
+            NavMode::Straight,
+            NavMode::Free,
+            NavMode::Instant,
+        ]
+        .into_iter()
+        .flat_map(|mode| {
+            Arrow::EVERY
+                .into_iter()
+                .map(move |way| Key::Arrow(way, mode))
+        }),
+    );
     // The key that opens the overlay is usually the reset key, and while the
     // overlay is up the compositor gives it to the submap rather than to the
     // keybind that started it. Binding it here is what makes a second press
@@ -239,29 +368,32 @@ impl Shortcuts {
             + 'static,
     {
         let manager: HyprlandGlobalShortcutsManagerV1 = globals.bind(qh, 1..=1, ()).ok()?;
-        let registered = keys()
-            .into_iter()
-            .map(|key| {
-                manager.register_shortcut(
-                    key.name(),
-                    APP_ID.to_string(),
-                    format!("wl-wysiwyc {}", key.name()),
-                    String::new(),
-                    qh,
-                    key,
-                )
-            })
-            .collect();
+        let mut registered = Vec::new();
+        for key in keys() {
+            let name = key.name();
+            registered.push(manager.register_shortcut(
+                name.clone(),
+                APP_ID.to_string(),
+                format!("wl-wysiwyc {name}"),
+                String::new(),
+                qh,
+                key,
+            ));
+        }
         let mut shortcuts = Shortcuts {
             manager,
             registered,
             entered: false,
         };
-        let binds: Vec<(String, String)> = keys()
+        let binds: Vec<(String, String, bool, bool)> = keys()
             .into_iter()
             .flat_map(|k| {
                 let id = k.name();
-                k.bindings().into_iter().map(move |b| (id.clone(), b))
+                let repeat = k.repeats();
+                let transparent = k.transparent();
+                k.bindings()
+                    .into_iter()
+                    .map(move |b| (id.clone(), b, repeat, transparent))
             })
             .collect();
         if let Err(e) = hypr::enter_submap(&binds) {
@@ -284,5 +416,47 @@ impl Drop for Shortcuts {
             shortcut.destroy();
         }
         self.manager.destroy();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{keys, Arrow, Key, NavMode};
+
+    #[test]
+    fn every_arrow_modifier_has_a_distinct_binding() {
+        let cases: [(NavMode, &str, &[&str], bool); 4] = [
+            (NavMode::Normal, "left", &["left"], true),
+            (NavMode::Straight, "straight-left", &["SHIFT + left"], true),
+            (
+                NavMode::Free,
+                "free-left",
+                &["ALT + left", "SHIFT + ALT + left"],
+                true,
+            ),
+            (
+                NavMode::Instant,
+                "instant-left",
+                &[
+                    "CTRL + left",
+                    "CTRL + SHIFT + left",
+                    "CTRL + ALT + left",
+                    "CTRL + SHIFT + ALT + left",
+                ],
+                false,
+            ),
+        ];
+        for (mode, id, bindings, repeats) in cases {
+            let key = Key::Arrow(Arrow::Left, mode);
+            assert_eq!(key.name(), id);
+            assert_eq!(key.bindings(), bindings);
+            assert_eq!(key.repeats(), repeats);
+            assert!(key.transparent());
+        }
+    }
+
+    #[test]
+    fn the_shortcut_set_contains_all_sixteen_arrow_modes() {
+        assert_eq!(keys().into_iter().filter(|key| key.is_arrow()).count(), 16);
     }
 }

@@ -43,6 +43,25 @@ keys:
   scroll_up: semicolon
   scroll_down: apostrophe
 
+  # The keyboard the labels are laid out on, so that where something is
+  # on screen decides which key names it: qwerty, dvorak, or none. With
+  # none there is no arrangement to follow and labels are handed out a
+  # to z in reading order instead.
+  layout: qwerty
+
+  # Letters to keep out of hints and the grid, run together. For the
+  # keys you would rather not reach for: excluded: tyughvbn leaves the
+  # eighteen that stay under a hand.
+  excluded: ""
+
+  # An extra key that puts the overlay back to how it opened, and closes
+  # it when there is nothing left to undo. Worth setting to whatever key
+  # opens the overlay: while the overlay is up that key belongs to the
+  # overlay rather than to the keybind that started it, so pressing it
+  # again undoes a wrong turn instead of doing nothing, and pressing
+  # it once more gets you out. Empty means none.
+  reset: ""
+
 pointer:
   # How far the mouse has to be moved by hand before the overlay gets
   # out of the way. Reaching for the mouse says the keyboard was not
@@ -52,16 +71,30 @@ pointer:
   # times a second while the overlay is open.
   cancel_px: 24
 
-  # A press of an arrow key steps to the next target that way. Holding
-  # it steps again after repeat_ms, and each wait after that is shorter
-  # than the last, down to repeat_min_ms.
-  repeat_ms: 280
-  repeat_min_ms: 70
+  # Arrow keys accelerate a free pointer. speed_px is its maximum speed,
+  # accel_px is how quickly it gets there, and launch_speed_px is the small
+  # velocity guaranteed on the first frame of even the shortest tap. ramp_ms
+  # eases a fresh press from fine control to full acceleration, while drag
+  # spends velocity after release. Set ramp_ms to 0 for immediate full
+  # acceleration. Alt+arrow instead moves at direct_speed_px with no
+  # acceleration or inertia.
+  speed_px: 1050
+  accel_px: 4800
+  launch_speed_px: 48
+  direct_speed_px: 320
+  ramp_ms: 220
+  drag: 16
 
-  # How far a tap of an arrow key looks for the next target that way.
-  # Past this it does nothing rather than throw the pointer across the
-  # window; hold the key to fly there instead.
-  reach_px: 260
+  # A held arrow stays in control. After all arrows are released, the
+  # nearest anchor to the projected coast endpoint attracts the pointer
+  # regardless of distance. The departure anchor is excluded for
+  # departure_ms so a short tap cannot be pulled straight back. attract_px
+  # is the softness distance used to scale the spring, not a cutoff. Pull
+  # grows stronger beyond it. Inside snap_px the spring finishes at the
+  # exact anchor coordinate.
+  departure_ms: 160
+  attract_px: 80
+  snap_px: 8
 
   # About how long the pointer takes to reach a target it was sent to
   # by name, by typing a hint. It is pulled there rather than put there,
@@ -72,6 +105,7 @@ scroll:
   # Wheel notches per press, and per press with shift. There is no
   # scroll-to-the-end on a wheel, only more of it, so shift sends a run
   # of notches: raise far for a document it does not get to the end of.
+  # Arrow movement against a window edge also uses step.
   step: 3
   far: 200
 
@@ -94,32 +128,13 @@ click:
   # head.
   charge: true
 
-  # The keyboard the labels are laid out on, so that where something is
-  # on screen decides which key names it: qwerty, dvorak, or none. With
-  # none there is no arrangement to follow and labels are handed out a
-  # to z in reading order instead.
-  layout: qwerty
-
-  # Letters to keep out of hints and the grid, run together. For the
-  # keys you would rather not reach for: excluded: tyughvbn leaves the
-  # eighteen that stay under a hand.
-  excluded: ""
-
-  # An extra key that puts the overlay back to how it opened, and closes
-  # it when there is nothing left to undo. Worth setting to whatever key
-  # opens the overlay: while the overlay is up that key belongs to the
-  # overlay rather than to the keybind that started it, so pressing it
-  # again undoes a wrong turn instead of doing nothing, and pressing
-  # it once more gets you out. Empty means none.
-  reset: ""
-
 label:
   size: 11.5    # text size
   pad_x: 4.5    # space either side of the text
   pad_y: 3.0    # space above and below
   gap: 3.0      # clearance kept between labels
   track: 2.5    # space between a label's characters
-  wake_ms: 700  # how long after the last arrow step the labels return
+  wake_ms: 700  # delay before labels replace navigation's red anchor dots
 
 colors:
   dim: "#00000000"          # laid over the output; add alpha to darken
@@ -132,7 +147,8 @@ colors:
   armed_key_text: "#8cffd1"
   ring: "#40eba1f2"         # around the element about to be clicked
   charge: "#fac94af2"       # the first level of a held click key
-  dot: "#e83e33f0"          # a target while the arrows are stepping
+  dot: "#e83e33f0"          # an anchor during keyboard navigation
+  nearest_dot: "#40a3fff5"  # the anchor nearest the moving pointer
   tile: "#14141a33"         # grid tiles
   tile_border: "#ffffff4d"
   text: "#fffffff5"         # grid letters and window numbers
@@ -145,6 +161,9 @@ elements:
 
 ## Notes
 
+- `pointer.repeat_ms`, `pointer.repeat_min_ms`, and `pointer.reach_px`
+  are accepted so an older config still loads, but continuous navigation
+  does not use them. Remove them after adding the motion settings above.
 - The two `keys` switches are worth trying first. The default is the
   quickest: type the hint, then `-` to click. `instant: true` drops that
   press and clicks the moment the hint is complete, faster and less

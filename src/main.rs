@@ -20,7 +20,9 @@ Usage:
                              Type a hint to send the pointer to it, then a
                              click key (- or Enter) to click; hold that key
                              to double click. Space switches to the letter
-                             grid, Tab picks another window, Esc backs out
+                             grid, Tab picks another window, Esc backs out.
+                             Shift keeps arrow motion straight, Alt moves
+                             freely, and Ctrl jumps between anchors
   wl-wysiwyc --list          print the windows that would be shown
   wl-wysiwyc --elements [N]  print the clickable elements detected for
                              window N, or the focused window (debugging aid)
@@ -38,8 +40,8 @@ Usage:
   wl-wysiwyc --drill SCRIPT [N]
                              put the overlay through a run of key presses on
                              the focused window and say where the pointer
-                             went: down:70 wait:400 right:250 presses down
-                             for 70ms, waits, then holds right. Nothing is
+                             went: down:70 wait:400 down+right:250 taps down,
+                             waits, then holds a diagonal chord. Nothing is
                              clicked and no keys are taken (debugging aid)
   wl-wysiwyc --keys          print the keys the overlay would bind and what
                              each one does, without showing anything
