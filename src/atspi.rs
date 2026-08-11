@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{HashSet, VecDeque};
 use std::error::Error;
 use std::sync::mpsc::Receiver;
@@ -291,7 +292,11 @@ pub fn watch_bounds(el: &Element) -> Option<Receiver<(f64, f64)>> {
     Some(rx)
 }
 
-pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn Error>> {
+pub fn clickable_elements(
+    pid: i32,
+    title: &str,
+    expected_size: (i32, i32),
+) -> Result<Vec<Element>, Box<dyn Error>> {
     if pid <= 0 {
         return Err("window has no pid".into());
     }
@@ -332,11 +337,52 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
     if frames.is_empty() {
         return Err("application exposes no windows on the accessibility bus".into());
     }
-    let frame = frames
+    let named_frames: Vec<_> = frames
         .iter()
-        .find(|(d, p)| name_of(&conn, d, p.as_str()).as_deref() == Some(title))
-        .unwrap_or(&frames[0])
-        .clone();
+        .map(|(dest, path)| {
+            (
+                dest.clone(),
+                path.clone(),
+                name_of(&conn, dest, path.as_str()).unwrap_or_default(),
+                extents_of(&conn, dest, path.as_str()),
+            )
+        })
+        .collect();
+    let exact = named_frames
+        .iter()
+        .filter(|(_, _, name, _)| name == title)
+        .count();
+    let wanted_words = title_words(title);
+    let score = |(_, _, name, extents): &(_, _, String, Option<(i32, i32, i32, i32)>)| {
+        frame_score(name, *extents, &wanted_words, expected_size)
+    };
+    let candidates = || named_frames.iter().enumerate();
+    let selected = if exact > 0 {
+        candidates()
+            .filter(|(_, (_, _, name, _))| name == title)
+            .min_by_key(|(_, frame)| score(frame))
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    } else {
+        candidates()
+            .min_by_key(|(_, frame)| score(frame))
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    };
+    let frame = &named_frames[selected];
+    let frame = (frame.0.clone(), frame.1.clone());
+    if std::env::var_os("WL_TRACE").is_some() {
+        let names = named_frames
+            .iter()
+            .map(|(_, _, name, extents)| format!("{name:?}@{extents:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "NAV atspi pid={pid} requested={title:?} size={expected_size:?} \
+             exact={} selected={selected} frames=[{names}]",
+            exact,
+        );
+    }
 
     let frame_ext = extents_of(&conn, &frame.0, frame.1.as_str());
     let (frame_w, frame_h) = match frame_ext {
@@ -477,7 +523,37 @@ pub fn clickable_elements(pid: i32, title: &str) -> Result<Vec<Element>, Box<dyn
     }
 
     out.sort_by(|a, b| (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap());
-    Ok(prune(out))
+    let out = prune(out);
+    if std::env::var_os("WL_TRACE").is_some() {
+        let page = out.iter().filter(|element| element.scrolls).count();
+        eprintln!(
+            "NAV atspi-result elements={} page={page} frame=({frame_w:.0},{frame_h:.0})",
+            out.len()
+        );
+    }
+    Ok(out)
+}
+
+fn title_words(title: &str) -> HashSet<String> {
+    title
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|word| word.len() >= 3 && !matches!(word.as_str(), "chromium" | "html" | "nav"))
+        .collect()
+}
+
+fn frame_score(
+    name: &str,
+    extents: Option<(i32, i32, i32, i32)>,
+    wanted_words: &HashSet<String>,
+    expected_size: (i32, i32),
+) -> (i64, Reverse<usize>) {
+    let size_error = extents.map_or(i64::MAX, |(_, _, width, height)| {
+        i64::from((width - expected_size.0).abs()) + i64::from((height - expected_size.1).abs())
+    });
+    let words = title_words(name);
+    let shared = words.intersection(wanted_words).count();
+    (size_error, Reverse(shared))
 }
 
 #[cfg(test)]
@@ -501,6 +577,48 @@ mod tests {
     const LIST_ITEM: u32 = 32;
     const LINK: u32 = 88;
     const BUTTON: u32 = 43;
+
+    #[test]
+    fn chromium_frame_selection_uses_geometry_then_title_words() {
+        let wanted = title_words("nav: grid - Chromium");
+        let expected = (1588, 1076);
+        let generator = frame_score(
+            "Generator - Chromium",
+            Some((0, 0, 1588, 326)),
+            &wanted,
+            expected,
+        );
+        let wrong_page = frame_score(
+            "form.html - Chromium",
+            Some((0, 0, 1588, 1076)),
+            &wanted,
+            expected,
+        );
+        let grid = frame_score(
+            "grid.html - Chromium",
+            Some((0, 0, 1588, 1076)),
+            &wanted,
+            expected,
+        );
+        let duplicate_title = frame_score(
+            "nav: grid - Chromium",
+            Some((0, 0, 1588, 326)),
+            &wanted,
+            expected,
+        );
+        let exact_title = frame_score(
+            "nav: grid - Chromium",
+            Some((0, 0, 1588, 1076)),
+            &wanted,
+            expected,
+        );
+        assert!(grid < generator, "a different-sized window ranked first");
+        assert!(grid < wrong_page, "title words did not break a size tie");
+        assert!(
+            exact_title < duplicate_title,
+            "duplicate titles did not use window geometry"
+        );
+    }
 
     #[test]
     fn a_row_gives_way_to_the_link_inside_it() {

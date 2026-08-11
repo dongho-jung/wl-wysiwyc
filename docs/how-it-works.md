@@ -353,8 +353,10 @@ their exact place.
 2. List applications from the registry root and match the window by
    comparing each connection's `GetConnectionUnixProcessID` against the
    window's pid from Hyprland.
-3. Pick the frame whose accessible name equals the window title (falls
-   back to the first frame).
+3. Pick the frame whose accessible name equals the window title. Chromium
+   can expose a filename while Hyprland exposes the document title, so a
+   mismatch is resolved by window size and shared title words instead of by
+   taking the first frame from the process.
 4. Breadth-first walk: collect nodes that are SHOWING and SENSITIVE and
    whose role is interactive (button, link, entry, check box, combo box,
    menu item, tab, slider, list item, and so on), reading their extents

@@ -361,10 +361,11 @@ struct Query {
 impl Query {
     fn start(snap: &Snapshot, win: usize) -> Self {
         let w = &snap.windows[win];
-        let (pid, title) = (w.pid, w.title.clone());
+        let (pid, title, size) = (w.pid, w.title.clone(), (w.w, w.h));
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(atspi::clickable_elements(pid, &title).map_err(|e| e.to_string()));
+            let _ =
+                tx.send(atspi::clickable_elements(pid, &title, size).map_err(|e| e.to_string()));
         });
         Self {
             win,
@@ -1793,7 +1794,7 @@ pub fn render(
         Some((k, f)) => (k, f.parse::<f32>().ok()),
         None => (keys, None),
     };
-    let els = atspi::clickable_elements(w.pid, &w.title).unwrap_or_else(|e| {
+    let els = atspi::clickable_elements(w.pid, &w.title, (w.w, w.h)).unwrap_or_else(|e| {
         eprintln!("atspi: {e}");
         Vec::new()
     });
