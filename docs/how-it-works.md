@@ -323,13 +323,13 @@ hitboxes whose accessible rectangle is wider or taller than the visible glyph,
 without treating a long text link as an icon. Small and compact targets add
 positions beside each side and corner to the normal half-label-step search,
 then take the nearest one that keeps `label.gap` clearance from the target and
-labels already placed. Every hint participates even while a prefix hides some
-of them, so labels do not jump as keys are typed. A dense cluster with no clear
-nearby position keeps a small target visible first, then minimizes actual
-label overlap and distance. Labels are also a little transparent, so the
-element under a centered one remains recognisable. Only the element about to
-be clicked is outlined, since ringing every candidate turns a dense corner of
-a window into a mess of boxes.
+other small and compact targets as well as labels already placed. Every hint
+participates even while a prefix hides some of them, so labels do not jump as
+keys are typed. A dense cluster with no clear nearby position minimizes target
+overlap first, then actual label overlap and distance. Labels are also a little
+transparent, so the element under a centered one remains recognisable. Only
+the element about to be clicked is outlined, since ringing every candidate
+turns a dense corner of a window into a mess of boxes.
 
 ### Grid mode
 
@@ -359,10 +359,10 @@ their exact place.
    can expose a filename while Hyprland exposes the document title, so a
    mismatch is resolved by window size and shared title words instead of by
    taking the first frame from the process.
-4. Breadth-first walk: collect nodes that are SHOWING and SENSITIVE and
-   whose role is interactive (button, link, entry, check box, combo box,
-   menu item, tab, slider, list item, and so on), reading their extents
-   in window coordinates. Budgets: 4000 nodes, 400 elements, 1.2 s.
+4. Breadth-first walk: collect nodes that are SHOWING, VISIBLE, and SENSITIVE
+   and whose role is interactive (button, link, entry, check box, combo box,
+   menu item, tab, slider, list item, and so on), reading their extents in
+   window coordinates. Budgets: 4000 nodes, 400 elements, 1.2 s.
    Running out of budget is reported on stderr, because the walk is
    breadth-first and a heavy page then keeps its chrome and loses part
    of its content.
@@ -388,6 +388,9 @@ their exact place.
    near-identical extents, and one hint per level buries the window in
    labels. A row or tree item that wraps another clickable element
    gives way to it, and what is left keeps one element per spot.
+   Chromium also publishes every shortcut card's small hover menu as visible
+   even while CSS hides it. Such a button is kept only for the card currently
+   under the pointer; the other cards keep just their links.
 7. Coordinate correction: toolkits report window-relative coordinates
    under Wayland (they do not know their global position), so the
    window's global position from Hyprland is added afterwards. Chromium

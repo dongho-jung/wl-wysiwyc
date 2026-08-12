@@ -959,10 +959,12 @@ impl Query {
     fn start(snap: &Snapshot, win: usize) -> Self {
         let w = &snap.windows[win];
         let (pid, title, size) = (w.pid, w.title.clone(), (w.w, w.h));
+        let pointer = hypr::cursor_pos().map(|(x, y)| (x - w.x as f64, y - w.y as f64));
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ =
-                tx.send(atspi::clickable_elements(pid, &title, size).map_err(|e| e.to_string()));
+            let _ = tx.send(
+                atspi::clickable_elements(pid, &title, size, pointer).map_err(|e| e.to_string()),
+            );
         });
         Self {
             win,
@@ -2722,7 +2724,8 @@ pub fn render(
     };
     canvas.clear(*config::get().colors.dim);
     let w = snap.windows.get(win).ok_or("no such window; see --list")?;
-    let els = atspi::clickable_elements(w.pid, &w.title, (w.w, w.h)).unwrap_or_else(|e| {
+    let pointer = hypr::cursor_pos().map(|(x, y)| (x - w.x as f64, y - w.y as f64));
+    let els = atspi::clickable_elements(w.pid, &w.title, (w.w, w.h), pointer).unwrap_or_else(|e| {
         eprintln!("atspi: {e}");
         Vec::new()
     });
@@ -2962,8 +2965,10 @@ fn label_hides_target(element: LabelBox, size: (i32, i32)) -> bool {
 /// Keep a label as close to its element center as possible. The search uses
 /// half-label steps so a small collision moves a label only as far as needed.
 /// A small target can be kept clear, in which case exact positions beside its
-/// four sides and corners join the search. If the nearby area is completely
-/// crowded, the fallback keeps the target clear before minimizing overlap.
+/// four sides and corners join the search. Other compact targets are protected
+/// as well, so moving one label off its own element cannot hide a neighbor. If
+/// the nearby area is completely crowded, the fallback minimizes target
+/// overlap before label overlap and distance.
 fn place_label_near(
     center: (i32, i32),
     size: (i32, i32),
@@ -2971,6 +2976,7 @@ fn place_label_near(
     canvas: (i32, i32),
     gap: i32,
     keep_clear: Option<LabelBox>,
+    avoid: &[LabelBox],
 ) -> LabelBox {
     const SEARCH_RINGS: i32 = 8;
 
@@ -3017,11 +3023,12 @@ fn place_label_near(
         dx * dx + dy * dy
     };
     candidates.sort_by_key(&distance);
-    let clears_target =
-        |candidate: &LabelBox| keep_clear.is_none_or(|element| !element.crowds(candidate, gap));
+    let protected = || keep_clear.iter().chain(avoid.iter());
+    let clears_targets =
+        |candidate: &LabelBox| protected().all(|element| !element.crowds(candidate, gap));
 
     if let Some(clear) = candidates.iter().find(|candidate| {
-        clears_target(candidate) && !taken.iter().any(|label| label.crowds(candidate, gap))
+        clears_targets(candidate) && !taken.iter().any(|label| label.crowds(candidate, gap))
     }) {
         return *clear;
     }
@@ -3039,7 +3046,7 @@ fn place_label_near(
     };
     if let Some(best) = candidates
         .iter()
-        .filter(|candidate| clears_target(candidate))
+        .filter(|candidate| clears_targets(candidate))
         .min_by_key(|candidate| label_score(candidate))
     {
         return *best;
@@ -3048,10 +3055,12 @@ fn place_label_near(
     candidates
         .into_iter()
         .min_by_key(|candidate| {
-            let target_overlap = keep_clear.map_or(0, |element| {
-                candidate.covers((element.x, element.y, element.w, element.h))
-            });
-            let target_crowded = keep_clear.is_some_and(|element| element.crowds(candidate, gap));
+            let target_overlap: i64 = protected()
+                .map(|element| candidate.covers((element.x, element.y, element.w, element.h)))
+                .sum();
+            let target_crowded = protected()
+                .filter(|element| element.crowds(candidate, gap))
+                .count();
             (target_overlap, target_crowded, label_score(candidate))
         })
         .unwrap_or_else(|| fit(origin))
@@ -3061,8 +3070,8 @@ fn place_label_near(
 ///
 /// Labels start at the element center unless that would obscure a small or
 /// compact target, then move the shortest available distance needed to clear
-/// the target and labels already placed. Placement covers every hint, not just
-/// the visible ones, so labels stay put while a prefix is typed.
+/// every compact target and labels already placed. Placement covers every
+/// hint, not just the visible ones, so labels stay put while a prefix is typed.
 fn place_labels(
     hints: &[Hint],
     font: &Font,
@@ -3083,24 +3092,31 @@ fn place_labels(
             (h.rh * scale as f64) as i32,
         )
     };
+    let elements: Vec<LabelBox> = hints
+        .iter()
+        .map(|hint| {
+            let (x, y, w, h) = rect_of(hint);
+            LabelBox { x, y, w, h }
+        })
+        .collect();
     let mut taken: Vec<LabelBox> = Vec::with_capacity(hints.len());
-    for h in hints {
-        let (ex, ey, ew, eh) = rect_of(h);
+    for (index, h) in hints.iter().enumerate() {
+        let element = elements[index];
         let bh = px as i32 + 2 * pad_y;
         // A one-key label keeps its box square rather than turning into a
         // sliver.
         let bw = (label_width(font, &h.label.to_ascii_uppercase(), px, scale as f32) as i32
             + 2 * pad_x)
             .max(bh);
-        let center = (ex + ew / 2, ey + eh / 2);
-        let element = LabelBox {
-            x: ex,
-            y: ey,
-            w: ew,
-            h: eh,
-        };
+        let center = (element.x + element.w / 2, element.y + element.h / 2);
         let keep_clear = label_hides_target(element, (bw, bh)).then_some(element);
-        let placed = place_label_near(center, (bw, bh), &taken, canvas, gap, keep_clear);
+        let avoid: Vec<LabelBox> = elements
+            .iter()
+            .enumerate()
+            .filter(|(other, target)| *other != index && label_hides_target(**target, (bw, bh)))
+            .map(|(_, target)| *target)
+            .collect();
+        let placed = place_label_near(center, (bw, bh), &taken, canvas, gap, keep_clear, &avoid);
         taken.push(placed);
     }
     taken
@@ -3935,7 +3951,7 @@ mod tests {
 
     #[test]
     fn labels_start_centered_and_move_only_to_avoid_each_other() {
-        let first = place_label_near((100, 100), (20, 10), &[], (200, 200), 3, None);
+        let first = place_label_near((100, 100), (20, 10), &[], (200, 200), 3, None, &[]);
         assert_eq!(
             first,
             LabelBox {
@@ -3946,13 +3962,13 @@ mod tests {
             }
         );
 
-        let second = place_label_near((100, 100), (20, 10), &[first], (200, 200), 3, None);
+        let second = place_label_near((100, 100), (20, 10), &[first], (200, 200), 3, None, &[]);
         assert!(!first.crowds(&second, 3));
         let dx = second.x + second.w / 2 - 100;
         let dy = second.y + second.h / 2 - 100;
         assert!(dx * dx + dy * dy <= 24 * 24, "label moved too far");
 
-        let edge = place_label_near((2, 2), (20, 10), &[], (200, 200), 3, None);
+        let edge = place_label_near((2, 2), (20, 10), &[], (200, 200), 3, None, &[]);
         assert_eq!((edge.x, edge.y), (0, 0));
     }
 
@@ -3974,18 +3990,57 @@ mod tests {
             (20, 10)
         ));
 
-        let first = place_label_near((100, 100), (20, 10), &[], (200, 200), 3, Some(element));
+        let first = place_label_near((100, 100), (20, 10), &[], (200, 200), 3, Some(element), &[]);
         assert!(!element.crowds(&first, 3));
         let first_dx = first.x + first.w / 2 - 100;
         let first_dy = first.y + first.h / 2 - 100;
         assert!(first_dx * first_dx + first_dy * first_dy <= 21 * 21);
 
-        let second = place_label_near((100, 100), (20, 10), &[first], (200, 200), 3, Some(element));
+        let second = place_label_near(
+            (100, 100),
+            (20, 10),
+            &[first],
+            (200, 200),
+            3,
+            Some(element),
+            &[],
+        );
         assert!(!element.crowds(&second, 3));
         assert!(!first.crowds(&second, 3));
         let second_dx = second.x + second.w / 2 - 100;
         let second_dy = second.y + second.h / 2 - 100;
         assert!(second_dx * second_dx + second_dy * second_dy <= 21 * 21);
+    }
+
+    #[test]
+    fn moving_a_label_off_its_target_does_not_hide_a_neighbor() {
+        let element = LabelBox {
+            x: 92,
+            y: 92,
+            w: 16,
+            h: 16,
+        };
+        let first_choice =
+            place_label_near((100, 100), (20, 10), &[], (200, 200), 3, Some(element), &[]);
+        let neighbor = LabelBox {
+            x: first_choice.x,
+            y: first_choice.y,
+            w: 12,
+            h: 12,
+        };
+        let placed = place_label_near(
+            (100, 100),
+            (20, 10),
+            &[],
+            (200, 200),
+            3,
+            Some(element),
+            &[neighbor],
+        );
+
+        assert!(!element.crowds(&placed, 3));
+        assert!(!neighbor.crowds(&placed, 3));
+        assert_ne!(placed, first_choice);
     }
 
     #[test]
@@ -4007,7 +4062,15 @@ mod tests {
             label_size
         ));
 
-        let placed = place_label_near((100, 100), label_size, &[], (200, 200), 3, Some(bookmark));
+        let placed = place_label_near(
+            (100, 100),
+            label_size,
+            &[],
+            (200, 200),
+            3,
+            Some(bookmark),
+            &[],
+        );
         assert!(!bookmark.crowds(&placed, 3));
     }
 
@@ -4019,7 +4082,7 @@ mod tests {
             w: 12,
             h: 12,
         };
-        let placed = place_label_near((6, 6), (20, 10), &[], (200, 200), 3, Some(element));
+        let placed = place_label_near((6, 6), (20, 10), &[], (200, 200), 3, Some(element), &[]);
         assert!(!element.crowds(&placed, 3));
         assert!(placed.x >= 0 && placed.y >= 0);
         assert!(placed.x + placed.w <= 200 && placed.y + placed.h <= 200);
@@ -4029,7 +4092,7 @@ mod tests {
     fn a_dense_label_cluster_spreads_nearby_without_overlap() {
         let mut placed = Vec::new();
         for _ in 0..25 {
-            let next = place_label_near((100, 100), (20, 10), &placed, (200, 200), 3, None);
+            let next = place_label_near((100, 100), (20, 10), &placed, (200, 200), 3, None, &[]);
             assert!(
                 placed.iter().all(|label| !label.crowds(&next, 3)),
                 "dense placement overlapped an existing label"

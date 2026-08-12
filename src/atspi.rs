@@ -13,6 +13,8 @@ const COORD_WINDOW: u32 = 1;
 
 // AtspiRole values from at-spi2 atspi-constants.h.
 const ROLE_DOCUMENT_WEB: u32 = 95;
+const ROLE_PUSH_BUTTON: u32 = 43;
+const ROLE_LINK: u32 = 88;
 pub const CLICKABLE_ROLES: &[u32] = &[
     7,  // check box
     8,  // check menu item
@@ -21,14 +23,14 @@ pub const CLICKABLE_ROLES: &[u32] = &[
     35, // menu item
     37, // page tab
     40, // password text
-    43, // push button
+    ROLE_PUSH_BUTTON,
     44, // radio button
     45, // radio menu item
     51, // slider
     52, // spin button
     62, // toggle button
     79, // entry
-    88, // link
+    ROLE_LINK,
     91, // tree item
 ];
 
@@ -43,6 +45,7 @@ const CONTAINER_ROLES: &[u32] = &[
 // AtspiStateType bit positions.
 const STATE_SENSITIVE: u64 = 24;
 const STATE_SHOWING: u64 = 25;
+const STATE_VISIBLE: u64 = 30;
 
 const MAX_NODES: usize = 4000;
 
@@ -118,15 +121,43 @@ fn same_spot(a: &Element, b: &Element) -> bool {
         && (a.h - b.h).abs() <= T
 }
 
+fn contains_point(element: &Element, (x, y): (f64, f64)) -> bool {
+    x >= element.x && y >= element.y && x < element.x + element.w && y < element.y + element.h
+}
+
+/// Chromium exposes a shortcut card's hover-only action button as SHOWING,
+/// VISIBLE, and SENSITIVE even while CSS has hidden it. The button is a small
+/// target inside the card's link rectangle and appears when the pointer enters
+/// that card, so keep it only for the card that is actually hovered. A missing
+/// pointer is not evidence that the control is hidden and leaves it alone.
+fn hidden_hover_button(e: &Element, els: &[Element], pointer: Option<(f64, f64)>) -> bool {
+    let Some(pointer) = pointer else {
+        return false;
+    };
+    if e.role != ROLE_PUSH_BUTTON {
+        return false;
+    }
+    let area = |element: &Element| element.w.max(0.0) * element.h.max(0.0);
+    els.iter().any(|host| {
+        host.role == ROLE_LINK
+            && inside(e, host)
+            && area(e) * 4.0 <= area(host)
+            && !contains_point(host, pointer)
+    })
+}
+
 /// One hint per target. Trees routinely nest a link inside a list row inside
 /// a cell, all with near-identical extents, and hinting every level of that
 /// buries the window in labels. Wrappers give way to what they wrap, and
 /// what is left keeps one element per spot.
-fn prune(els: Vec<Element>) -> Vec<Element> {
+fn prune(els: Vec<Element>, pointer: Option<(f64, f64)>) -> Vec<Element> {
     let is_container = |e: &Element| CONTAINER_ROLES.contains(&e.role);
     let area = |e: &Element| e.w * e.h;
     let mut kept: Vec<Element> = Vec::with_capacity(els.len());
     for (i, e) in els.iter().enumerate() {
+        if hidden_hover_button(e, &els, pointer) {
+            continue;
+        }
         let wraps_a_target = is_container(e)
             && els
                 .iter()
@@ -296,6 +327,7 @@ pub fn clickable_elements(
     pid: i32,
     title: &str,
     expected_size: (i32, i32),
+    pointer: Option<(f64, f64)>,
 ) -> Result<Vec<Element>, Box<dyn Error>> {
     if pid <= 0 {
         return Err("window has no pid".into());
@@ -432,6 +464,7 @@ pub fn clickable_elements(
             };
             let st = info.state;
             let showing = st & (1 << STATE_SHOWING) != 0;
+            let visible = showing && st & (1 << STATE_VISIBLE) != 0;
 
             // A node's own rectangle, once Chromium's pixel ratio is divided
             // out.
@@ -455,9 +488,9 @@ pub fn clickable_elements(
             // and a page that has hidden a widget in a corner still gets
             // hinted once the visible part is done.
             let promising =
-                showing && rect.is_none_or(|r| r.2 <= 0.0 || r.3 <= 0.0 || on_screen(r));
+                visible && rect.is_none_or(|r| r.2 <= 0.0 || r.3 <= 0.0 || on_screen(r));
 
-            if showing && CLICKABLE_ROLES.contains(&role) && st & (1 << STATE_SENSITIVE) != 0 {
+            if visible && CLICKABLE_ROLES.contains(&role) && st & (1 << STATE_SENSITIVE) != 0 {
                 if let Some((ex, ey, ew, eh)) = rect {
                     if ew >= 3.0 && eh >= 3.0 && on_screen((ex, ey, ew, eh)) {
                         let key = (ex as i32, ey as i32, ew as i32, eh as i32, role);
@@ -523,7 +556,7 @@ pub fn clickable_elements(
     }
 
     out.sort_by(|a, b| (a.y, a.x).partial_cmp(&(b.y, b.x)).unwrap());
-    let out = prune(out);
+    let out = prune(out, pointer);
     if std::env::var_os("WL_TRACE").is_some() {
         let page = out.iter().filter(|element| element.scrolls).count();
         eprintln!(
@@ -626,7 +659,7 @@ mod tests {
             el(LIST_ITEM, 0.0, 0.0, 400.0, 60.0),
             el(LINK, 8.0, 4.0, 120.0, 20.0),
         ];
-        let kept = prune(els);
+        let kept = prune(els, None);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].role, LINK);
     }
@@ -637,7 +670,7 @@ mod tests {
             el(LIST_ITEM, 0.0, 0.0, 400.0, 60.0),
             el(LINK, 8.0, 400.0, 120.0, 20.0),
         ];
-        assert_eq!(prune(els).len(), 2);
+        assert_eq!(prune(els, None).len(), 2);
     }
 
     #[test]
@@ -647,7 +680,7 @@ mod tests {
             el(LINK, 12.0, 11.0, 41.0, 39.0),
             el(BUTTON, 80.0, 10.0, 40.0, 40.0),
         ];
-        let kept = prune(els);
+        let kept = prune(els, None);
         assert_eq!(kept.len(), 2);
         assert_eq!(kept[0].role, BUTTON);
         assert_eq!(kept[1].x, 80.0);
@@ -659,8 +692,30 @@ mod tests {
             el(LIST_ITEM, 0.0, 0.0, 400.0, 200.0),
             el(LIST_ITEM, 10.0, 10.0, 380.0, 40.0),
         ];
-        let kept = prune(els);
+        let kept = prune(els, None);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].h, 40.0);
+    }
+
+    #[test]
+    fn a_link_hides_its_small_hover_button_until_the_pointer_enters() {
+        let card = el(LINK, 100.0, 100.0, 160.0, 160.0);
+        let action = el(BUTTON, 220.0, 106.0, 32.0, 32.0);
+
+        let hidden = prune(vec![card.clone(), action.clone()], Some((20.0, 20.0)));
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].role, LINK);
+
+        let hovered = prune(vec![card, action], Some((180.0, 180.0)));
+        assert_eq!(hovered.len(), 2);
+    }
+
+    #[test]
+    fn a_visible_tab_close_button_is_not_treated_as_hover_only() {
+        const PAGE_TAB: u32 = 37;
+        let tab = el(PAGE_TAB, 100.0, 100.0, 160.0, 40.0);
+        let close = el(BUTTON, 220.0, 104.0, 28.0, 28.0);
+
+        assert_eq!(prune(vec![tab, close], Some((20.0, 20.0))).len(), 2);
     }
 }

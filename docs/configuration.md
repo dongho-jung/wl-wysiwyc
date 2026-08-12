@@ -184,8 +184,8 @@ elements:
 - Labels start at their element centers when that leaves the target visible.
   A label that would hide most of a small element, or sit over a compact icon
   hitbox, instead takes the nearest position around it. Labels keep `label.gap`
-  clearance from both that target and each other. If a dense cluster has no
-  clear nearby position, actual overlap is minimized.
+  clearance from that target, other small and compact targets, and each other.
+  If a dense cluster has no clear nearby position, actual overlap is minimized.
 - `dim` is transparent by default. The labels carry themselves against
   most windows, and darkening the screen to read them is a tax on every
   glance; `#00000047` is the old look if the contrast is wanted.
