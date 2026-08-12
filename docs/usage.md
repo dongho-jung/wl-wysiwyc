@@ -8,7 +8,9 @@ The initial target is the anchor nearest the pointer.
 
 Type a label to move to that element. In grid mode, press a letter to move to
 the center of its tile. Labels follow the configured keyboard layout, so their
-first key reflects the target's position in the window. Nearby labels move only
+first key reflects the target's position in the window. Labels sit near the
+center when the target is large enough to remain visible. Small and compact
+icon targets keep their labels just outside instead. Nearby labels move only
 as far as needed to avoid overlapping.
 
 `Space` switches between labels and the grid unless it has another configured

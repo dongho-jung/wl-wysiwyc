@@ -315,15 +315,21 @@ rather than squeezing a column of elements into the three keys above
 each other. Labels are prefix-free, so a complete label is never the
 start of another one.
 
-Each key narrows the visible hints. Every label starts centered on its
-element. Placement searches outward in half-label steps and takes the nearest
-position that keeps `label.gap` clearance from labels already placed. Every
-hint participates even while a prefix hides some of them, so labels do not
-jump as keys are typed. A dense cluster with no clear nearby position uses the
-candidate with the least actual overlap, then the shortest distance. Labels
-are also a little transparent, so the element under one remains recognisable.
-Only the element about to be clicked is outlined, since ringing every
-candidate turns a dense corner of a window into a mess of boxes.
+Each key narrows the visible hints. A label starts centered on its element when
+that does not hide most of the target. A target also counts as compact when one
+dimension is no more than three times the matching label dimension and the
+other is no more than twice its match. This catches bookmark-style icon
+hitboxes whose accessible rectangle is wider or taller than the visible glyph,
+without treating a long text link as an icon. Small and compact targets add
+positions beside each side and corner to the normal half-label-step search,
+then take the nearest one that keeps `label.gap` clearance from the target and
+labels already placed. Every hint participates even while a prefix hides some
+of them, so labels do not jump as keys are typed. A dense cluster with no clear
+nearby position keeps a small target visible first, then minimizes actual
+label overlap and distance. Labels are also a little transparent, so the
+element under a centered one remains recognisable. Only the element about to
+be clicked is outlined, since ringing every candidate turns a dense corner of
+a window into a mess of boxes.
 
 ### Grid mode
 
