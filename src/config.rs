@@ -77,9 +77,9 @@ pub struct Keys {
     /// belongs to it, so pressing it again undoes a wrong turn instead of
     /// doing nothing. Empty means no such key.
     pub reset: String,
-    /// The keys that scroll the window under the pointer while the overlay
-    /// is up. Shift with one scrolls to the end, ctrl scrolls sideways.
-    /// Empty means no such key.
+    /// The keys that scroll vertically without closing the overlay. Empty
+    /// means no dedicated key; Shift with an arrow still scrolls in all four
+    /// directions.
     pub scroll_up: String,
     pub scroll_down: String,
     /// The keyboard the labels are laid out on, so that where an element is
@@ -172,7 +172,7 @@ impl Keys {
             .filter(|k| !self.left().contains(k) && !self.right().contains(k))
     }
 
-    /// The keys that scroll, if they are set.
+    /// The dedicated vertical scroll keys, if they are set.
     pub fn scroll_up(&self) -> Option<String> {
         Some(key_name(&self.scroll_up)).filter(|k| !k.is_empty())
     }
@@ -339,16 +339,16 @@ impl Pointer {
     }
 }
 
-/// How much a scroll key moves the window under the pointer.
+/// How much Shift-arrow scrolling moves the window under the pointer.
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Scroll {
     /// Wheel notches per press or edge-scroll tick, the way a mouse wheel
     /// counts them.
     pub step: u32,
-    /// Notches for a press with shift, which is meant to reach the end of
-    /// the document. Raise it for something longer than it gets to.
-    pub far: u32,
+    /// Accepted so configs from the retired far-scroll behavior keep loading.
+    #[serde(rename = "far")]
+    _legacy_far: Option<u32>,
     /// How long after the last scroll to read the window again. Everything
     /// has moved by then, so the hints have to be worked out afresh, and
     /// doing that on every press of a key held down would be a waste.
@@ -359,7 +359,7 @@ impl Default for Scroll {
     fn default() -> Self {
         Scroll {
             step: 3,
-            far: 200,
+            _legacy_far: None,
             settle_ms: 120,
         }
     }
@@ -645,15 +645,18 @@ mod tests {
     }
 
     #[test]
-    fn the_scroll_keys_are_claimed_like_any_other() {
-        let c: Config = serde_yaml::from_str("keys:\n  scroll_up: \";\"\n").unwrap();
-        assert_eq!(c.keys.scroll_up().as_deref(), Some("semicolon"));
-        assert_eq!(c.keys.scroll_down().as_deref(), Some("apostrophe"));
-        assert!(c.keys.claimed().contains(&"semicolon".to_string()));
-        let c: Config =
-            serde_yaml::from_str("keys:\n  scroll_up: j\n  scroll_down: \"\"\n").unwrap();
-        assert_eq!(c.keys.scroll_down(), None);
+    fn dedicated_scroll_settings_are_normalized_and_claimed() {
+        let c: Config = serde_yaml::from_str(
+            "keys:\n  scroll_up: j\n  scroll_down: apostrophe\nscroll:\n  far: 200\n",
+        )
+        .unwrap();
+        assert_eq!(c.keys.scroll_up(), Some("j".into()));
+        assert_eq!(c.keys.scroll_down(), Some("apostrophe".into()));
+        assert!(c.keys.claimed().contains(&"j".to_string()));
         assert!(c.keys.reserved_letters().contains(&'j'));
+        assert_eq!(Keys::default().scroll_up(), Some("semicolon".into()));
+        assert_eq!(Keys::default().scroll_down(), Some("apostrophe".into()));
+        assert_eq!(c.scroll.step, 3);
     }
 
     #[test]

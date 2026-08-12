@@ -22,8 +22,9 @@ Usage:
                              key down and move to drag, then release to drop.
                              Space switches to the letter grid, Tab picks
                              another window, Esc backs out.
-                             Shift jumps to the last anchor that way, Alt
-                             moves freely, and Ctrl jumps between anchors
+                             ; and ' scroll vertically. Shift+arrow scrolls
+                             that way, Alt moves freely, and Ctrl jumps
+                             between anchors
   wl-wysiwyc --list          print the windows that would be shown
   wl-wysiwyc --elements [N]  print the clickable elements detected for
                              window N, or the focused window (debugging aid)

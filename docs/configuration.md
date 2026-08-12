@@ -32,16 +32,15 @@ keys:
   left_click: [minus, return]
   right_click: equal
 
+  # Dedicated vertical scroll keys. Shift+arrow also scrolls in the
+  # arrow's direction. Empty disables either dedicated key.
+  scroll_up: semicolon
+  scroll_down: apostrophe
+
   # Swaps element hints for the letter grid. Give this key to a click
   # and it stops switching, since a key does one job; name another key
   # here to keep the grid within reach. Empty means none.
   switch: space
-
-  # The keys that scroll the window under the pointer, without leaving
-  # the overlay. Shift with one goes to the end, ctrl turns the pair
-  # sideways, so ctrl scroll_up scrolls left. Empty means none.
-  scroll_up: semicolon
-  scroll_down: apostrophe
 
   # The keyboard the labels are laid out on, so that where something is
   # on screen decides which key names it: qwerty, dvorak, or none. With
@@ -103,16 +102,14 @@ pointer:
   travel_ms: 280
 
 scroll:
-  # Wheel notches per press, and per press with shift. There is no
-  # scroll-to-the-end on a wheel, only more of it, so shift sends a run
-  # of notches: raise far for a document it does not get to the end of.
-  # Arrow movement against a window edge also uses step.
+  # Wheel notches per dedicated scroll key, Shift+arrow press or repeat,
+  # or arrow movement against a window edge.
   step: 3
-  far: 200
 
   # Reading a window takes long enough to be worth doing once. Scrolling
-  # moves everything the hints named, so they fade until this long after
-  # the last scroll, and then the window is read again.
+  # moves everything the hints named, so the window is read again this
+  # long after the last scroll. Anchors remain visible until a letter is
+  # typed.
   settle_ms: 120
 
 label:
@@ -121,7 +118,7 @@ label:
   pad_y: 3.0    # space above and below
   gap: 3.0      # clearance kept between labels
   track: 2.5    # space between a label's characters
-  wake_ms: 700  # delay before labels replace navigation's red anchor dots
+  wake_ms: 700  # delay before labels replace pointer-navigation dots
 
 colors:
   dim: "#00000000"          # laid over the output; add alpha to darken
@@ -152,15 +149,18 @@ elements:
   does not use them. Remove them after adding the motion settings above.
 - The retired `click` block and `colors.charge` are also accepted but
   ignored, so configs from the old charging and multi-click behavior load.
+- The retired `scroll.far` setting is accepted but ignored. Dedicated scroll
+  keys and Shift+arrow both use `scroll.step`.
 - The two `keys` switches are worth trying first. The default is the
   quickest: type the hint, then `-` to click. `instant: true` drops that
   press and clicks the moment the hint is complete, faster and less
   forgiving. A mouse button already held by a click key takes precedence,
   so completing a hint still moves the pointer and continues that drag.
   `confirm: true` goes the other way and wants every key twice.
-- A click key does not have to be one of the defaults. Any key xkb can
-  name works, and if it is a letter the hints and the grid make room by
-  leaving that letter out. The same goes for `reset` and `switch`.
+- A click or dedicated scroll key does not have to be one of the defaults.
+  Any key xkb can name works, and if it is a letter the hints and the grid
+  make room by leaving that letter out. The same goes for `reset` and
+  `switch`.
 - Several keys can drive the same button. `left_click: [minus, space,
   enter]` uses the left mouse button from any of the three. They are one
   shortcut with three keys on it, not three shortcuts.

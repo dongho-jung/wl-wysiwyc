@@ -85,6 +85,10 @@ pub struct Snapshot {
 const RESCUE: &str = "CTRL + escape";
 /// The app id the global shortcuts are registered under.
 const APP: &str = "wl-wysiwyc";
+/// Release Shift in the focused client without changing the physical key
+/// state the compositor uses to keep a Shift-arrow binding active.
+const RELEASE_SHIFT: &str =
+    r#"hl.dsp.send_key_state({ mods = "", key = "code:42", state = "up" })"#;
 
 /// The submap the overlay's keys live in. The name carries a digest of the
 /// keys themselves, because a submap cannot be cleared: defining one twice
@@ -216,6 +220,20 @@ pub fn leave_submap() -> Result<(), Box<dyn Error>> {
     dispatch_submap("reset")
 }
 
+/// Stop the focused client from treating the Shift used by a scroll shortcut
+/// as part of the pointer-axis event. The physical modifier remains down in
+/// the compositor, so held Shift-arrow shortcuts still repeat. Its eventual
+/// physical release leaves the client in the normal unshifted state.
+pub fn release_shift_for_scroll() -> Result<(), Box<dyn Error>> {
+    if hyprctl(&["dispatch", RELEASE_SHIFT]).is_ok_and(|r| r == "ok") {
+        return Ok(());
+    }
+    match hyprctl(&["dispatch", "sendkeystate", ",code:42,up,activewindow"])?.as_str() {
+        "ok" => Ok(()),
+        other => Err(format!("hyprctl release Shift for scroll: {other}").into()),
+    }
+}
+
 fn dispatch_submap(name: &str) -> Result<(), Box<dyn Error>> {
     let lua = format!("hl.dsp.submap(\"{name}\")");
     if hyprctl(&["dispatch", &lua]).is_ok_and(|r| r == "ok") {
@@ -344,7 +362,7 @@ pub fn snapshot() -> Result<Snapshot, Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{legacy_bind_directive, lua_bind_options};
+    use super::{legacy_bind_directive, lua_bind_options, RELEASE_SHIFT};
 
     #[test]
     fn moving_arrows_repeat_and_cannot_be_shadowed() {
@@ -359,5 +377,12 @@ mod tests {
     fn instant_arrows_are_transparent_but_do_not_repeat() {
         assert_eq!(legacy_bind_directive(false, true), "bindt");
         assert_eq!(lua_bind_options(false, true), ", { transparent = true }");
+    }
+
+    #[test]
+    fn scrolling_releases_shift_only_in_the_focused_client() {
+        assert!(RELEASE_SHIFT.contains("mods = \"\""));
+        assert!(RELEASE_SHIFT.contains("code:42"));
+        assert!(RELEASE_SHIFT.contains("state = \"up\""));
     }
 }

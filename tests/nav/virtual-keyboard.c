@@ -17,6 +17,7 @@
 
 static struct wl_seat *seat;
 static struct zwp_virtual_keyboard_manager_v1 *manager;
+static uint32_t shift_mask;
 
 static void global(void *data, struct wl_registry *registry, uint32_t name,
                    const char *interface, uint32_t version) {
@@ -57,6 +58,10 @@ static void sleep_ms(unsigned ms) {
 }
 
 static int keycode(const char *name) {
+    if (strcmp(name, "shift") == 0)
+        return KEY_LEFTSHIFT;
+    if (strcmp(name, "right-shift") == 0)
+        return KEY_RIGHTSHIFT;
     if (strcmp(name, "left") == 0)
         return KEY_LEFT;
     if (strcmp(name, "right") == 0)
@@ -65,6 +70,12 @@ static int keycode(const char *name) {
         return KEY_UP;
     if (strcmp(name, "down") == 0)
         return KEY_DOWN;
+    if (strcmp(name, "semicolon") == 0)
+        return KEY_SEMICOLON;
+    if (strcmp(name, "apostrophe") == 0)
+        return KEY_APOSTROPHE;
+    if (strcmp(name, "a") == 0)
+        return KEY_A;
     if (strcmp(name, "escape") == 0)
         return KEY_ESC;
     fprintf(stderr, "unknown key: %s\n", name);
@@ -86,6 +97,14 @@ static int send_keymap(struct zwp_virtual_keyboard_v1 *keyboard) {
         xkb_context_unref(context);
         return -1;
     }
+    xkb_mod_index_t shift =
+        xkb_keymap_mod_get_index(keymap, XKB_MOD_NAME_SHIFT);
+    if (shift == XKB_MOD_INVALID || shift >= 32) {
+        xkb_keymap_unref(keymap);
+        xkb_context_unref(context);
+        return -1;
+    }
+    shift_mask = 1U << shift;
     char *text = xkb_keymap_get_as_string(keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
     size_t size = text ? strlen(text) + 1 : 0;
     int fd = memfd_create("wl-wysiwyc-keymap", MFD_CLOEXEC);
@@ -154,6 +173,11 @@ int main(int argc, char **argv) {
             return 1;
         }
         zwp_virtual_keyboard_v1_key(keyboard, now_ms(), (uint32_t)code, state);
+        if (code == KEY_LEFTSHIFT || code == KEY_RIGHTSHIFT) {
+            uint32_t depressed =
+                state == WL_KEYBOARD_KEY_STATE_PRESSED ? shift_mask : 0;
+            zwp_virtual_keyboard_v1_modifiers(keyboard, depressed, 0, 0, 0);
+        }
         wl_display_flush(display);
         sleep_ms(4);
     }

@@ -108,39 +108,46 @@ input region, so every edge and motion reaches the window underneath. A
 cancelled run releases every held virtual button before destroying the
 pointer, which prevents a stuck drag.
 
-`keys.scroll_up` and `keys.scroll_down` (`;` and `'`) turn the wheel
-over whatever the pointer is on, without leaving the overlay: shift
-sends a long run of notches to reach the end, ctrl turns the pair
-sideways. It is the virtual pointer doing it, and the overlay takes no
-pointer input, so the wheel reaches the window underneath exactly as a
-real one would. Scrolling moves everything the hints named, so they
-travel with it: whatever the document moved by, everything inside it
-moved by, and the labels are carried the same distance within a frame
-of the content rather than left behind. They are drawn faded and answer
-to nothing while this is going on, since following is not the same as
-being right, and the window is read again once the scrolling settles.
-Fading rather than clearing them is deliberate: labels that go out and
-come back are two flinches where a fade is none.
+`;` and `'` scroll vertically without leaving the overlay. `Shift+arrow` does
+the same on the arrow's axis, including horizontal scrolling, and repeats while
+held. Each press sends `scroll.step` wheel notches. Immediately before the
+first Shift+arrow scroll frame, the focused client receives a Shift release.
+The physical modifier remains down in the shortcut backend, so holding the
+arrow still repeats, but applications cannot turn the intended vertical scroll
+into their own Shift-wheel gesture. The eventual physical Shift release leaves
+the client unshifted as usual. Dedicated scroll keys do not need or send this
+modifier correction.
+
+The overlay takes no pointer input, so the scroll reaches the window
+underneath. Scrolling immediately replaces labels with the compact anchor-dot
+view. Whatever the document moved by, everything inside it moved by, so the
+anchors are carried the same distance within a frame of the content rather than
+left behind. The window is read again once scrolling settles, but the refreshed
+view remains anchors. Any alphabetic key switches back to labels and continues
+as hint input. If that key arrives before the refresh is ready, it is queued and
+replayed afterward rather than discarded. Numbers and punctuation leave the
+anchor view in place.
 
 Only what is inside a document travels. The walk marks every element
 under a `document web` node, and the chrome around one - tabs,
 bookmarks, toolbar - is left alone, since it does not move when the
 page does.
 
-A wheel turned by hand does the same thing without saying so: the
-overlay takes no pointer input, so the scroll goes straight past it.
-One element inside the document is asked where it is twenty times a
-second, which is a single message, and its answer is also how far to
-carry the labels, so a wheel turned by hand reads the same as a scroll
-key. It has to be an element that scrolls for the answer to mean
-anything, which is why the chrome is no use as the one to watch.
+A wheel turned by hand does the same thing without saying so: the overlay takes
+no pointer input, so the scroll goes straight past it. One element inside the
+document is asked where it is twenty times a second, which is a single message,
+and its answer is also how far to carry the anchors. It has to be an element
+that scrolls for the answer to mean anything, which is why the chrome is no use
+as the one to watch.
 
 Shift, ctrl and alt with a click key reach the window as themselves.
 The overlay never takes the keyboard, so the window under it already
 knows which modifiers are down, and injecting the button edges while they
 are held is all a shift click is. The submap binds every combination of the
 three to the same shortcut, which is what stops the compositor handing
-the combination back to the window as a keystroke instead.
+the combination back to the window as a keystroke instead. A Shift-arrow
+scroll deliberately ends the client's current Shift state, so release and
+press Shift again before a later Shift-click in the same overlay run.
 
 Two settings change this. `keys.instant` clicks the moment a hint is
 complete, skipping the pause and the choice. It is suspended while a click
@@ -173,11 +180,10 @@ long holds still reach full speed. Releasing every arrow applies
 `pointer.drag`, leaving a short coast that spends its velocity instead of
 another queued move. Any non-arrow input clears the chord immediately.
 
-Modifiers select separate movement contracts:
+Modified arrows select separate actions:
 
-- `Shift+arrow` follows the same visual path as repeated `Ctrl+arrow` presses
-  and jumps to its last anchor. It does no travel animation and does not
-  repeat while held.
+- `Shift+arrow` scrolls on the matching axis and repeats while held. It does
+  not move the pointer or select another anchor.
 - `Alt+arrow` moves at the constant `pointer.direct_speed_px`. It applies no
   acceleration, inertia, attraction, or snap. Release leaves the pointer at
   its exact arbitrary coordinate, while the nearest anchor remains blue as a
@@ -185,11 +191,12 @@ Modifiers select separate movement contracts:
 - `Ctrl+arrow` does no travel animation. It chooses the next anchor in the
   requested visual row or column and sends the pointer there in one frame.
   The binding does not repeat while held, so one physical press means one
-  anchor jump. When no anchor remains that way, either directional jump
-  scrolls on that axis.
+  anchor jump. When no anchor remains that way, the Ctrl jump scrolls on that
+  axis.
 
-Both jump modes refresh the compact anchor-dot frame. Labels return after
-`label.wake_ms`, just as they do when continuous motion stops.
+The Ctrl jump refreshes the compact anchor-dot frame. Labels return after
+`label.wake_ms`, just as they do when continuous motion stops, unless a scroll
+has pinned the anchor view until alphabetic input.
 
 All continuous arrows currently down are combined before motion is
 integrated.
@@ -204,7 +211,8 @@ global-shortcut client. Continuous modes also repeat while physically held.
 The first press gets a lease long enough to reach the compositor's repeat
 delay; after repeats begin, every pulse renews a 120ms lease. If a compositor
 still drops every release edge, stopped repeats expire the direction instead
-of letting it accelerate to a screen edge. Shift and Ctrl jumps do not repeat.
+of letting it accelerate to a screen edge. Ctrl jumps do not repeat; Shift
+scrolling does.
 
 When every arrow is released, drag first gives a projected coast endpoint.
 The anchor nearest that endpoint becomes the magnetic target. Using the
@@ -236,14 +244,15 @@ it expires, the source and behind-direction anchors participate like every
 other anchor.
 
 The normal label frame and a compact frame of small red anchor dots are
-rendered before movement. The first arrow swaps the cached dot buffer onto
-the parent surface. The nearest anchor is covered by a blue dot on one small
-subsurface, and the focus ring moves on another.
+rendered before movement. The first arrow swaps the cached dot buffer onto the
+parent surface. Scrolling also selects that compact frame and keeps it selected
+until alphabetic input. The nearest anchor is covered by a blue dot on one
+small subsurface, and the focus ring moves on another.
 Pointer requests are flushed without a Wayland round trip, and the
-output-sized parent is not repainted during motion. The labels return after
-motion stops and `label.wake_ms` expires.
+output-sized parent is not repainted during motion. Pointer navigation returns
+to labels after motion stops and `label.wake_ms` expires.
 The pointer cannot pass the active window edge while an arrow is pushing it.
-Velocity into that edge is discarded rather than stored up, and wheel events
+Velocity into that edge is discarded rather than stored up, and scroll events
 are sent on the matching axis at a bounded rate. A diagonal at a corner can
 scroll both axes. Hint refresh waits until held motion and any magnetic
 landing finish, then keeps an Alt-positioned pointer at its exact coordinate
@@ -496,8 +505,9 @@ release.
   WL_TRACE=1 wl-wysiwyc --drill "right:60 wait:500" 2
   ```
 
-  Modifier modes use `end-right`, `free-right`, or `instant-right`
-  (and the other directions) in a drill script.
+  Directional actions use `shift-right`, `free-right`, or `instant-right`
+  (and the other directions) in a drill script. `scroll-right` is an alias
+  for `shift-right`.
 
   `WL_TRACE=1` adds a line per frame of the pointer's own motion, and
   `WL_KEYS=1` a line per key edge the compositor delivers. Between them

@@ -69,22 +69,18 @@ impl Arrow {
         match self {
             Self::Left => Wheel {
                 back: true,
-                far: false,
                 across: true,
             },
             Self::Right => Wheel {
                 back: false,
-                far: false,
                 across: true,
             },
             Self::Up => Wheel {
                 back: true,
-                far: false,
                 across: false,
             },
             Self::Down => Wheel {
                 back: false,
-                far: false,
                 across: false,
             },
         }
@@ -106,7 +102,6 @@ impl Arrow {
 pub enum NavMode {
     #[default]
     Normal,
-    End,
     Free,
     Instant,
 }
@@ -115,7 +110,6 @@ impl NavMode {
     fn modifiers(self) -> &'static [&'static str] {
         match self {
             Self::Normal => &[""],
-            Self::End => &["SHIFT"],
             Self::Free => &["ALT", "SHIFT + ALT"],
             Self::Instant => &["CTRL", "CTRL + SHIFT", "CTRL + ALT", "CTRL + SHIFT + ALT"],
         }
@@ -124,7 +118,6 @@ impl NavMode {
     fn id(self) -> &'static str {
         match self {
             Self::Normal => "",
-            Self::End => "end-",
             Self::Free => "free-",
             Self::Instant => "instant-",
         }
@@ -144,55 +137,38 @@ pub enum Key {
     Reset,
     /// Swap element hints for the letter grid, and back.
     Switch,
-    /// Move the pointer in one of the four navigation modes.
+    /// Move the pointer in one of the three navigation modes.
     Arrow(Arrow, NavMode),
-    /// Scroll the window under the pointer.
+    /// Scroll the window under the pointer with a configured vertical key.
     Scroll(Wheel),
+    /// Scroll in any direction with Shift and the matching arrow.
+    ShiftScroll(Wheel),
 }
 
 impl Key {
-    pub(crate) fn is_arrow(self) -> bool {
-        matches!(self, Self::Arrow(..))
-    }
-
     pub(crate) fn is_motion_arrow(self) -> bool {
         matches!(self, Self::Arrow(_, NavMode::Normal | NavMode::Free))
     }
 
     pub(crate) fn repeats(self) -> bool {
-        self.is_motion_arrow()
+        self.is_motion_arrow() || matches!(self, Self::ShiftScroll(_))
     }
 
     pub(crate) fn transparent(self) -> bool {
-        self.is_arrow()
+        matches!(self, Self::Arrow(..) | Self::ShiftScroll(_))
     }
 }
 
-/// A scroll: which way, how far, and along which axis. Shift asks for the
-/// end of the document rather than a few notches, ctrl turns the pair of
-/// keys sideways.
+/// A scroll direction encoded as a wheel axis and sign.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Wheel {
     /// Up, or left when across.
     pub back: bool,
-    /// All the way, rather than a few notches.
-    pub far: bool,
     /// Sideways.
     pub across: bool,
 }
 
 impl Wheel {
-    /// Every direction a pair of scroll keys can be asked for.
-    pub fn every() -> impl Iterator<Item = Wheel> {
-        [false, true].into_iter().flat_map(|back| {
-            [false, true].into_iter().flat_map(move |far| {
-                [false, true]
-                    .into_iter()
-                    .map(move |across| Wheel { back, far, across })
-            })
-        })
-    }
-
     fn way(self) -> &'static str {
         match (self.across, self.back) {
             (false, true) => "up",
@@ -229,7 +205,6 @@ impl Key {
     /// each with every modifier combination, so a shortcut is not always one
     /// binding.
     pub fn bindings(self) -> Vec<String> {
-        let keys = &crate::config::get().keys;
         if let Key::Arrow(way, mode) = self {
             return mode
                 .modifiers()
@@ -240,18 +215,17 @@ impl Key {
                 })
                 .collect();
         }
+        if let Key::ShiftScroll(w) = self {
+            return vec![format!("SHIFT + {}", w.way())];
+        }
+        let keys = &crate::config::get().keys;
         if let Key::Scroll(w) = self {
-            let key = match (w.back, keys.scroll_up(), keys.scroll_down()) {
-                (true, Some(k), _) | (false, _, Some(k)) => k,
-                _ => return Vec::new(),
-            };
-            let mods: Vec<&str> = [(w.far, "SHIFT"), (w.across, "CTRL")]
-                .into_iter()
-                .filter_map(|(on, m)| on.then_some(m))
-                .collect();
-            return match mods.is_empty() {
-                true => vec![key],
-                false => vec![format!("{} + {key}", mods.join(" + "))],
+            if w.across {
+                return Vec::new();
+            }
+            return match (w.back, keys.scroll_up(), keys.scroll_down()) {
+                (true, Some(key), _) | (false, _, Some(key)) => vec![key],
+                _ => Vec::new(),
             };
         }
         let clicks = match self {
@@ -288,10 +262,8 @@ impl Key {
             Key::Reset => keys.reset().unwrap_or_default(),
             Key::Switch => keys.switch().unwrap_or_default(),
             Key::Arrow(way, mode) => format!("{}{name}", mode.id(), name = way.name()),
-            Key::Scroll(w) => match w.far {
-                true => format!("scroll-{}-far", w.way()),
-                false => format!("scroll-{}", w.way()),
-            },
+            Key::Scroll(w) => format!("scroll-{}", w.way()),
+            Key::ShiftScroll(w) => format!("shift-scroll-{}", w.way()),
         }
     }
 }
@@ -313,18 +285,13 @@ pub fn keys() -> Vec<Key> {
         Key::Tab,
     ];
     out.extend(
-        [
-            NavMode::Normal,
-            NavMode::End,
-            NavMode::Free,
-            NavMode::Instant,
-        ]
-        .into_iter()
-        .flat_map(|mode| {
-            Arrow::EVERY
-                .into_iter()
-                .map(move |way| Key::Arrow(way, mode))
-        }),
+        [NavMode::Normal, NavMode::Free, NavMode::Instant]
+            .into_iter()
+            .flat_map(|mode| {
+                Arrow::EVERY
+                    .into_iter()
+                    .map(move |way| Key::Arrow(way, mode))
+            }),
     );
     // The key that opens the overlay is usually the reset key, and while the
     // overlay is up the compositor gives it to the submap rather than to the
@@ -336,7 +303,16 @@ pub fn keys() -> Vec<Key> {
     if cfg.switch().is_some() {
         out.push(Key::Switch);
     }
-    out.extend(Wheel::every().map(Key::Scroll));
+    out.extend(
+        Arrow::EVERY
+            .into_iter()
+            .map(|way| Key::ShiftScroll(way.wheel())),
+    );
+    out.extend(
+        [Arrow::Up, Arrow::Down]
+            .into_iter()
+            .map(|way| Key::Scroll(way.wheel())),
+    );
     out.extend(
         ('a'..='z')
             .chain('1'..='9')
@@ -425,9 +401,8 @@ mod tests {
 
     #[test]
     fn every_arrow_modifier_has_a_distinct_binding() {
-        let cases: [(NavMode, &str, &[&str], bool); 4] = [
+        let cases: [(NavMode, &str, &[&str], bool); 3] = [
             (NavMode::Normal, "left", &["left"], true),
-            (NavMode::End, "end-left", &["SHIFT + left"], false),
             (
                 NavMode::Free,
                 "free-left",
@@ -456,7 +431,46 @@ mod tests {
     }
 
     #[test]
-    fn the_shortcut_set_contains_all_sixteen_arrow_modes() {
-        assert_eq!(keys().into_iter().filter(|key| key.is_arrow()).count(), 16);
+    fn shift_arrows_are_repeating_directional_scrolls() {
+        let key = Key::ShiftScroll(Arrow::Left.wheel());
+        assert_eq!(key.name(), "shift-scroll-left");
+        assert_eq!(key.bindings(), ["SHIFT + left"]);
+        assert!(key.repeats());
+        assert!(key.transparent());
+    }
+
+    #[test]
+    fn dedicated_vertical_scroll_keys_keep_the_old_defaults() {
+        let up = Key::Scroll(Arrow::Up.wheel());
+        let down = Key::Scroll(Arrow::Down.wheel());
+        assert_eq!(up.name(), "scroll-up");
+        assert_eq!(down.name(), "scroll-down");
+        assert_eq!(up.bindings(), ["semicolon"]);
+        assert_eq!(down.bindings(), ["apostrophe"]);
+        assert!(!up.repeats());
+        assert!(!up.transparent());
+    }
+
+    #[test]
+    fn the_shortcut_set_contains_navigation_and_scroll_directions() {
+        let keys = keys();
+        assert_eq!(
+            keys.iter()
+                .filter(|key| matches!(key, Key::Arrow(..)))
+                .count(),
+            12
+        );
+        assert_eq!(
+            keys.iter()
+                .filter(|key| matches!(key, Key::ShiftScroll(_)))
+                .count(),
+            4
+        );
+        assert_eq!(
+            keys.iter()
+                .filter(|key| matches!(key, Key::Scroll(_)))
+                .count(),
+            2
+        );
     }
 }

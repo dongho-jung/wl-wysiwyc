@@ -129,16 +129,16 @@ impl Drill {
             "right" => Ok(Key::Arrow(Arrow::Right, NavMode::Normal)),
             "up" => Ok(Key::Arrow(Arrow::Up, NavMode::Normal)),
             "down" => Ok(Key::Arrow(Arrow::Down, NavMode::Normal)),
-            "end-left" | "straight-left" | "shift-left" => {
-                Ok(Key::Arrow(Arrow::Left, NavMode::End))
+            "scroll-left" | "scrollleft" | "shift-left" => {
+                Ok(Key::ShiftScroll(Arrow::Left.wheel()))
             }
-            "end-right" | "straight-right" | "shift-right" => {
-                Ok(Key::Arrow(Arrow::Right, NavMode::End))
+            "scroll-right" | "scrollright" | "shift-right" => {
+                Ok(Key::ShiftScroll(Arrow::Right.wheel()))
             }
-            "end-up" | "straight-up" | "shift-up" => Ok(Key::Arrow(Arrow::Up, NavMode::End)),
-            "end-down" | "straight-down" | "shift-down" => {
-                Ok(Key::Arrow(Arrow::Down, NavMode::End))
-            }
+            "shift-up" => Ok(Key::ShiftScroll(Arrow::Up.wheel())),
+            "shift-down" => Ok(Key::ShiftScroll(Arrow::Down.wheel())),
+            "scroll-up" | "scrollup" => Ok(Key::Scroll(Arrow::Up.wheel())),
+            "scroll-down" | "scrolldown" => Ok(Key::Scroll(Arrow::Down.wheel())),
             "free-left" | "alt-left" => Ok(Key::Arrow(Arrow::Left, NavMode::Free)),
             "free-right" | "alt-right" => Ok(Key::Arrow(Arrow::Right, NavMode::Free)),
             "free-up" | "alt-up" => Ok(Key::Arrow(Arrow::Up, NavMode::Free)),
@@ -150,16 +150,6 @@ impl Drill {
             "esc" | "escape" => Ok(Key::Escape),
             "tab" => Ok(Key::Tab),
             "space" => Ok(Key::Char(' ')),
-            "scrollup" => Ok(Key::Scroll(Wheel {
-                back: true,
-                far: false,
-                across: false,
-            })),
-            "scrolldown" => Ok(Key::Scroll(Wheel {
-                back: false,
-                far: false,
-                across: false,
-            })),
             "click" => Ok(Key::LeftClick),
             one if one.chars().count() == 1 => Ok(Key::Char(one.chars().next().unwrap())),
             other => Err(format!("{other}: not a key")),
@@ -184,6 +174,29 @@ enum Stage {
     PickWindow,
     PickTile { win: usize },
     PickHint { win: usize },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum HintDisplay {
+    #[default]
+    Labels,
+    ScrollAnchors,
+}
+
+impl HintDisplay {
+    fn scrolled(&mut self) {
+        *self = Self::ScrollAnchors;
+    }
+
+    fn typed(&mut self, ch: char) {
+        if ch.is_ascii_alphabetic() {
+            *self = Self::Labels;
+        }
+    }
+
+    fn shows_scroll_anchors(self) -> bool {
+        self == Self::ScrollAnchors
+    }
 }
 
 /// A short-lived filter that keeps a new directional gesture from choosing
@@ -622,25 +635,9 @@ fn pull(
         .map(|(i, _)| i)
 }
 
-/// Follow the same visual path as repeated next-anchor jumps and return its
-/// final box. Every step moves farther along the requested axis, so the walk
-/// cannot revisit a box.
-fn pull_to_end(from: Rect, way: (f64, f64), boxes: &[Rect], wander: bool) -> Option<usize> {
-    let mut from = from;
-    let mut last = None;
-    for _ in 0..boxes.len() {
-        let Some(next) = pull(from, way, boxes, f64::INFINITY, wander) else {
-            break;
-        };
-        from = boxes[next];
-        last = Some(next);
-    }
-    last
-}
-
 /// Keep a keyboard-driven pointer inside its active window and report each
 /// outward direction that hit an edge. A diagonal can therefore request one
-/// horizontal and one vertical wheel event without increasing pointer speed.
+/// horizontal and one vertical scroll event without increasing pointer speed.
 fn constrain_to_window(
     at: &mut (f64, f64),
     vel: &mut (f64, f64),
@@ -897,7 +894,18 @@ struct App {
     /// A scroll waiting for the loop to send it, and when to look at the
     /// window again once the scrolling stops.
     scroll: VecDeque<Wheel>,
+    /// A Shift-arrow press is live, so repeats do not release Shift in the
+    /// client again until the physical arrow is released.
+    shift_scroll_held: bool,
+    /// Release the client's Shift state before sending the next scroll frame.
+    scroll_needs_unshift: bool,
     settle: Option<Instant>,
+    /// Scrolling pins the compact anchor view until an alphabetic key asks
+    /// for labels again.
+    hint_display: HintDisplay,
+    /// Alphabetic input received before the refreshed hints are ready. Replay
+    /// it after settling so the key that wakes labels is not discarded.
+    deferred_letters: VecDeque<char>,
     /// One cooldown per edge, in left, right, up, down order.
     edge_scrolled: [Option<Instant>; 4],
     /// Says how far the window moved under the overlay, wheel or otherwise.
@@ -1066,7 +1074,11 @@ pub fn run(
         buttons: ButtonInput::default(),
         buttons_enabled: drill.is_none(),
         scroll: VecDeque::new(),
+        shift_scroll_held: false,
+        scroll_needs_unshift: false,
         settle: None,
+        hint_display: HintDisplay::default(),
+        deferred_letters: VecDeque::new(),
         edge_scrolled: [None; 4],
         watch: None,
         armed: None,
@@ -1355,6 +1367,15 @@ pub fn run(
                 continue;
             }
             if let Some(vp) = pointer.as_ref() {
+                if app.scroll_needs_unshift && !app.scroll.is_empty() {
+                    app.scroll_needs_unshift = false;
+                    if let Err(e) = hypr::release_shift_for_scroll() {
+                        eprintln!("scroll modifier: {e}");
+                        // Let the next repeat retry instead of turning one
+                        // transient IPC failure into a dead held gesture.
+                        app.shift_scroll_held = false;
+                    }
+                }
                 while let Some(wheel) = app.scroll.pop_front() {
                     send_scroll(vp, wheel);
                 }
@@ -1514,13 +1535,15 @@ pub fn run(
                     drift = None;
                 }
             }
-            // The labels are due back once navigation has stopped. Clear the
-            // timestamp as well, so an expired wake delay does not keep the
-            // idle loop polling forever.
-            let dots = app.dots();
-            if app.navigating.is_some() && !dots {
+            // An expired navigation timer must not keep the idle loop polling
+            // when scrolling has independently pinned the anchor view.
+            if app
+                .navigating
+                .is_some_and(|t| t.elapsed() >= config::get().label.wake())
+            {
                 app.navigating = None;
             }
+            let dots = app.dots();
             if app.showed_dots != dots {
                 app.dirty = true;
             }
@@ -1642,9 +1665,8 @@ pub fn move_only(snap: &Snapshot, target: (f64, f64)) -> Result<(), Box<dyn Erro
     Ok(())
 }
 
-/// Turn the wheel over whatever the pointer is on. The overlay takes no
-/// pointer input, so this reaches the window underneath the same way a real
-/// wheel would.
+/// Scroll whatever the pointer is on. The overlay takes no pointer input, so
+/// this reaches the window underneath.
 fn send_scroll(vp: &ZwlrVirtualPointerV1, wheel: Wheel) {
     let axis = match wheel.across {
         true => wl_pointer::Axis::HorizontalScroll,
@@ -1654,15 +1676,7 @@ fn send_scroll(vp: &ZwlrVirtualPointerV1, wheel: Wheel) {
     vp.axis_source(wl_pointer::AxisSource::Wheel);
     // A notch is fifteen units by convention, and the discrete count is what
     // an application that counts wheel clicks reads.
-    let cfg = &config::get().scroll;
-    let mut left = match wheel.far {
-        // There is no "scroll to the end" on a wheel, only more of it. One
-        // enormous event does not do it: an application is free to clamp what
-        // a single event may move, and several do. A run of ordinary ones
-        // gets there in every application that scrolls at all.
-        true => cfg.far.max(1),
-        false => cfg.step.max(1),
-    } as i32;
+    let mut left = config::get().scroll.step.max(1) as i32;
     while left > 0 {
         let n = left.min(10);
         left -= n;
@@ -1880,16 +1894,18 @@ impl App {
         }
     }
 
-    /// Scroll the window under the pointer, and forget the hints: they name
-    /// where things were, and where things are is what the scroll changed.
-    /// They come back once the scrolling settles, which is the point at which
-    /// reading the window again is worth the pause.
+    /// Scroll the window under the pointer and pin the compact anchor view.
+    /// The hints are refreshed once scrolling settles, but labels wait for
+    /// alphabetic input before they replace the anchors.
     fn roll(&mut self, wheel: Wheel) {
         if matches!(self.stage, Stage::PickWindow) {
             return;
         }
         self.scroll.push_back(wheel);
         self.shifted((0.0, 0.0));
+        if !self.show_navigation_frame() {
+            self.dirty = true;
+        }
     }
 
     fn navigation_bounds(&self) -> Option<(f64, f64, f64, f64)> {
@@ -1917,20 +1933,20 @@ impl App {
         self.roll(way.wheel());
     }
 
-    /// The window moved under the overlay: the labels name where things were.
-    /// Drop them and read again once it stops moving.
+    /// The window moved under the overlay: show anchors while their positions
+    /// follow the content, then read them again once it stops moving.
     fn shifted(&mut self, (dx, dy): (f64, f64)) {
         if matches!(self.stage, Stage::PickWindow) {
             return;
         }
         self.settle = Some(Instant::now() + config::get().scroll.settle());
+        self.hint_display.scrolled();
         self.typed.clear();
         self.armed = None;
         self.dirty = true;
-        // Carry the labels along rather than leave them behind. Whatever the
-        // document moved by, everything in it moved by, so the labels can
-        // follow within a frame of the content instead of waiting out the
-        // read that will place them exactly.
+        // Carry the anchors along rather than leave them behind. Whatever the
+        // document moved by, everything in it moved by, so they can follow
+        // within a frame instead of waiting out the exact refresh.
         if dx == 0.0 && dy == 0.0 {
             return;
         }
@@ -1998,6 +2014,14 @@ impl App {
             self.show_anchor_indicator(false);
         }
         self.dirty = true;
+
+        let deferred = std::mem::take(&mut self.deferred_letters);
+        for ch in deferred {
+            self.press(Key::Char(ch));
+            if self.exit {
+                break;
+            }
+        }
     }
 
     /// A click key coming up releases the matching virtual mouse button.
@@ -2009,8 +2033,9 @@ impl App {
             return;
         }
         match key {
-            Key::Arrow(_, NavMode::End | NavMode::Instant) => (),
+            Key::Arrow(_, NavMode::Instant) => (),
             Key::Arrow(way, mode) => self.hold_arrow(way.index(), mode, false),
+            Key::ShiftScroll(_) => self.shift_scroll_held = false,
             _ => {}
         }
     }
@@ -2034,14 +2059,29 @@ impl App {
             Key::Tab => return self.pick_window(),
             Key::Reset => return self.reset_or_quit(),
             Key::Switch => return self.switch_mode(),
-            Key::Arrow(way, NavMode::End) => return self.jump_anchor(way, true),
-            Key::Arrow(way, NavMode::Instant) => return self.jump_anchor(way, false),
+            Key::Arrow(way, NavMode::Instant) => return self.jump_anchor(way),
             Key::Arrow(way, mode) => return self.hold_arrow(way.index(), mode, true),
+            Key::ShiftScroll(w) => {
+                if !self.shift_scroll_held {
+                    self.shift_scroll_held = true;
+                    self.scroll_needs_unshift = true;
+                }
+                return self.roll(w);
+            }
             Key::Scroll(w) => return self.roll(w),
             Key::Char(ch) => ch.to_ascii_lowercase(),
             // Taken above, before navigation state can be changed.
             Key::LeftClick | Key::RightClick => return,
         };
+        self.hint_display.typed(ch);
+        if ch.is_ascii_alphabetic() {
+            self.navigating = None;
+            self.dirty = true;
+            if self.settle.is_some() {
+                self.deferred_letters.push_back(ch);
+                return;
+            }
+        }
         if config::get().keys.confirm {
             // Every key is shown before it is taken: the first press arms it,
             // the same key again takes it, and any other key aims elsewhere.
@@ -2187,9 +2227,8 @@ impl App {
         }
     }
 
-    /// Move immediately to the next anchor, or the last anchor reached by
-    /// following that same directional path.
-    fn jump_anchor(&mut self, way: Arrow, to_end: bool) {
+    /// Move immediately to the next anchor in the requested direction.
+    fn jump_anchor(&mut self, way: Arrow) {
         if matches!(self.stage, Stage::PickWindow) || self.settle.is_some() {
             return;
         }
@@ -2217,10 +2256,7 @@ impl App {
             .filter(|(what, _, _)| Some(*what) != current)
             .collect();
         let boxes: Vec<Rect> = candidates.iter().map(|(_, _, rect)| *rect).collect();
-        let next = match to_end {
-            true => pull_to_end(mine, way.vector(), &boxes, true),
-            false => pull(mine, way.vector(), &boxes, f64::INFINITY, true),
-        };
+        let next = pull(mine, way.vector(), &boxes, f64::INFINITY, true);
         let now = Instant::now();
         self.navigating = Some(now);
         if !self.show_navigation_frame() {
@@ -2275,13 +2311,14 @@ impl App {
         self.arrows.any()
     }
 
-    /// Whether a compact anchor-only frame would be appropriate. Full frames
-    /// are suspended during motion when the pointer subsurface is available.
+    /// Whether the compact anchor-only frame is active. Pointer navigation
+    /// uses it briefly; scrolling keeps it until alphabetic input arrives.
     fn dots(&self) -> bool {
         matches!(self.stage, Stage::PickHint { .. })
-            && self
-                .navigating
-                .is_some_and(|t| t.elapsed() < config::get().label.wake())
+            && (self.hint_display.shows_scroll_anchors()
+                || self
+                    .navigating
+                    .is_some_and(|t| t.elapsed() < config::get().label.wake()))
     }
 
     /// Whatever the pointer is nearest, and how far off it is.
@@ -2413,6 +2450,8 @@ impl App {
         self.show_pointer_indicator(false);
         self.show_anchor_indicator(false);
         self.navigating = None;
+        self.hint_display = HintDisplay::default();
+        self.deferred_letters.clear();
         self.navigation_buffer = None;
         // Hints are about to be rebuilt in some of the ways here, and what
         // was lit was an index into the old ones.
@@ -3368,15 +3407,15 @@ fn arrow_of(keysym: Keysym) -> Option<Arrow> {
     }
 }
 
-fn mode_of(modifiers: Modifiers) -> NavMode {
+fn modified_arrow(way: Arrow, modifiers: Modifiers) -> Key {
     if modifiers.ctrl {
-        NavMode::Instant
+        Key::Arrow(way, NavMode::Instant)
     } else if modifiers.alt {
-        NavMode::Free
+        Key::Arrow(way, NavMode::Free)
     } else if modifiers.shift {
-        NavMode::End
+        Key::ShiftScroll(way.wheel())
     } else {
-        NavMode::Normal
+        Key::Arrow(way, NavMode::Normal)
     }
 }
 
@@ -3385,7 +3424,7 @@ fn mode_of(modifiers: Modifiers) -> NavMode {
 fn key_of(event: &KeyEvent, modifiers: Modifiers) -> Option<Key> {
     let cfg = &config::get().keys;
     if let Some(way) = arrow_of(event.keysym) {
-        return Some(Key::Arrow(way, mode_of(modifiers)));
+        return Some(modified_arrow(way, modifiers));
     }
     match event.keysym {
         Keysym::Escape => return Some(Key::Escape),
@@ -3402,6 +3441,12 @@ fn key_of(event: &KeyEvent, modifiers: Modifiers) -> Option<Key> {
     }
     if cfg.reset().is_some_and(|k| k == name) {
         return Some(Key::Reset);
+    }
+    if cfg.scroll_up().is_some_and(|k| k == name) {
+        return Some(Key::Scroll(Arrow::Up.wheel()));
+    }
+    if cfg.scroll_down().is_some_and(|k| k == name) {
+        return Some(Key::Scroll(Arrow::Down.wheel()));
     }
     if cfg.switch().is_some_and(|k| k == name) {
         return Some(Key::Switch);
@@ -3598,6 +3643,7 @@ impl KeyboardHandler for App {
     ) {
         if let Some(way) = arrow_of(event.keysym) {
             self.arrows.release_any(way.index(), Instant::now());
+            self.shift_scroll_held = false;
         } else if let Some(key) = key_of(&event, self.keyboard_modifiers) {
             self.release(key);
         }
@@ -3644,9 +3690,9 @@ wayland_client::delegate_noop!(App: ignore ZwlrVirtualPointerV1);
 #[cfg(test)]
 mod tests {
     use super::{
-        arrow_direction, config, constrain_to_window, label_hides_target, mode_of,
-        place_label_near, pull, pull_to_end, Arrow, ArrowKeys, ButtonEdge, ButtonInput, Drift,
-        Drill, Key, LabelBox, Modifiers, NavMode, Rect, BTN_LEFT, BTN_RIGHT,
+        arrow_direction, config, constrain_to_window, label_hides_target, modified_arrow,
+        place_label_near, pull, Arrow, ArrowKeys, ButtonEdge, ButtonInput, Drift, Drill,
+        HintDisplay, Key, LabelBox, Modifiers, NavMode, Rect, BTN_LEFT, BTN_RIGHT,
     };
     use std::time::{Duration, Instant};
 
@@ -3659,6 +3705,21 @@ mod tests {
     /// Somewhere for the pointer to run out of, well past anywhere these
     /// tests send it.
     const WALL: (f64, f64) = (10_000.0, 10_000.0);
+
+    #[test]
+    fn scroll_anchors_wait_for_alphabetic_input() {
+        let mut display = HintDisplay::default();
+        display.scrolled();
+        assert!(display.shows_scroll_anchors());
+
+        for ch in ['1', ';', '\''] {
+            display.typed(ch);
+            assert!(display.shows_scroll_anchors());
+        }
+
+        display.typed('A');
+        assert!(!display.shows_scroll_anchors());
+    }
 
     /// Pull toward a named target and watch the pointer get there: how long
     /// until it has covered all but a twentieth of the way, how long until it
@@ -3758,8 +3819,8 @@ mod tests {
     }
 
     #[test]
-    fn a_drill_can_select_each_modifier_mode() {
-        let drill = Drill::parse("end-right free-down instant-left").unwrap();
+    fn a_drill_can_select_each_directional_action() {
+        let drill = Drill::parse("shift-right free-down instant-left").unwrap();
         assert_eq!(
             drill
                 .steps
@@ -3767,7 +3828,7 @@ mod tests {
                 .map(|(keys, _)| keys[0])
                 .collect::<Vec<_>>(),
             vec![
-                Key::Arrow(Arrow::Right, NavMode::End),
+                Key::ShiftScroll(Arrow::Right.wheel()),
                 Key::Arrow(Arrow::Down, NavMode::Free),
                 Key::Arrow(Arrow::Left, NavMode::Instant),
             ]
@@ -3790,28 +3851,37 @@ mod tests {
     #[test]
     fn fallback_modifier_precedence_matches_the_shortcuts() {
         assert_eq!(
-            mode_of(Modifiers {
-                shift: true,
-                ..Modifiers::default()
-            }),
-            NavMode::End
+            modified_arrow(
+                Arrow::Left,
+                Modifiers {
+                    shift: true,
+                    ..Modifiers::default()
+                }
+            ),
+            Key::ShiftScroll(Arrow::Left.wheel())
         );
         assert_eq!(
-            mode_of(Modifiers {
-                shift: true,
-                alt: true,
-                ..Modifiers::default()
-            }),
-            NavMode::Free
+            modified_arrow(
+                Arrow::Left,
+                Modifiers {
+                    shift: true,
+                    alt: true,
+                    ..Modifiers::default()
+                }
+            ),
+            Key::Arrow(Arrow::Left, NavMode::Free)
         );
         assert_eq!(
-            mode_of(Modifiers {
-                ctrl: true,
-                alt: true,
-                shift: true,
-                ..Modifiers::default()
-            }),
-            NavMode::Instant
+            modified_arrow(
+                Arrow::Left,
+                Modifiers {
+                    ctrl: true,
+                    alt: true,
+                    shift: true,
+                    ..Modifiers::default()
+                }
+            ),
+            Key::Arrow(Arrow::Left, NavMode::Instant)
         );
     }
 
@@ -3933,17 +4003,6 @@ mod tests {
             Rect::new(80.0, 44.0, 40.0, 20.0),
         ];
         assert_eq!(pull(from, RIGHT, &boxes, f64::INFINITY, true), Some(1));
-    }
-
-    #[test]
-    fn shift_selection_reaches_the_end_of_the_ctrl_path() {
-        let from = Rect::new(0.0, 0.0, 40.0, 20.0);
-        let boxes = [
-            Rect::new(300.0, 0.0, 40.0, 20.0),
-            Rect::new(80.0, 0.0, 40.0, 20.0),
-            Rect::new(80.0, 44.0, 40.0, 20.0),
-        ];
-        assert_eq!(pull_to_end(from, RIGHT, &boxes, true), Some(0));
     }
 
     #[test]
