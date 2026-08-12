@@ -164,8 +164,7 @@ fn elements(n: Option<usize>) -> Result<(), Box<dyn Error>> {
     };
     let w = snap.windows.get(idx).ok_or("no such window; see --list")?;
     println!("window {}: [{}] {}", idx + 1, w.class, w.title);
-    let pointer = hypr::cursor_pos().map(|(x, y)| (x - w.x as f64, y - w.y as f64));
-    let els = atspi::clickable_elements(w.pid, &w.title, (w.w, w.h), pointer)?;
+    let els = atspi::clickable_elements(w.pid, &w.title, (w.w, w.h))?;
     let centers: Vec<(f64, f64)> = els
         .iter()
         .map(|e| (e.x + e.w / 2.0, e.y + e.h / 2.0))

@@ -11,9 +11,8 @@ the center of its tile. Labels follow the configured keyboard layout, so their
 first key reflects the target's position in the window. Labels sit near the
 center when the target is large enough to remain visible. Small and compact
 icon targets keep their labels just outside instead, and nearby labels avoid
-covering them too. Hover-only controls stay out of the hint set until their
-containing card is under the pointer. Nearby labels move only as far as needed
-to avoid overlapping.
+covering them too. Nearby labels move only as far as needed to avoid
+overlapping.
 
 `Space` switches between labels and the grid unless it has another configured
 job. `Tab` opens the window picker, then `1` through `9` selects a window.

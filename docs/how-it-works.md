@@ -359,13 +359,16 @@ their exact place.
    can expose a filename while Hyprland exposes the document title, so a
    mismatch is resolved by window size and shared title words instead of by
    taking the first frame from the process.
-4. Breadth-first walk: collect nodes that are SHOWING, VISIBLE, and SENSITIVE
-   and whose role is interactive (button, link, entry, check box, combo box,
-   menu item, tab, slider, list item, and so on), reading their extents in
-   window coordinates. Budgets: 4000 nodes, 400 elements, 1.2 s.
+4. Breadth-first walk: collect nodes that are SHOWING and SENSITIVE and
+   whose role is interactive (button, link, entry, check box, combo box,
+   menu item, tab, slider, list item, and so on), reading their extents
+   in window coordinates. Budgets: 4000 nodes, 400 elements, 1.2 s.
    Running out of budget is reported on stderr, because the walk is
    breadth-first and a heavy page then keeps its chrome and loses part
    of its content.
+   `VISIBLE` is deliberately not required. Chromium can omit it from
+   on-screen toolbar controls while its UI changes, which would leave a
+   partial row of hints.
    A node costs four calls (role, state, extents, children) and a window
    runs to several hundred nodes, so the walk reads 32 nodes at a time
    with a thread each. One zbus connection carries them all: replies are
@@ -388,9 +391,9 @@ their exact place.
    near-identical extents, and one hint per level buries the window in
    labels. A row or tree item that wraps another clickable element
    gives way to it, and what is left keeps one element per spot.
-   Chromium also publishes every shortcut card's small hover menu as visible
-   even while CSS hides it. Such a button is kept only for the card currently
-   under the pointer; the other cards keep just their links.
+   Some Chromium pages also expose CSS-hidden controls as SHOWING. They
+   remain in the hint set because inferring their visibility from nesting
+   or geometry also removes real toolbar and page controls.
 7. Coordinate correction: toolkits report window-relative coordinates
    under Wayland (they do not know their global position), so the
    window's global position from Hyprland is added afterwards. Chromium

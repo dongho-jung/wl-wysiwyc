@@ -959,12 +959,10 @@ impl Query {
     fn start(snap: &Snapshot, win: usize) -> Self {
         let w = &snap.windows[win];
         let (pid, title, size) = (w.pid, w.title.clone(), (w.w, w.h));
-        let pointer = hypr::cursor_pos().map(|(x, y)| (x - w.x as f64, y - w.y as f64));
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let _ = tx.send(
-                atspi::clickable_elements(pid, &title, size, pointer).map_err(|e| e.to_string()),
-            );
+            let _ =
+                tx.send(atspi::clickable_elements(pid, &title, size).map_err(|e| e.to_string()));
         });
         Self {
             win,
@@ -2724,8 +2722,7 @@ pub fn render(
     };
     canvas.clear(*config::get().colors.dim);
     let w = snap.windows.get(win).ok_or("no such window; see --list")?;
-    let pointer = hypr::cursor_pos().map(|(x, y)| (x - w.x as f64, y - w.y as f64));
-    let els = atspi::clickable_elements(w.pid, &w.title, (w.w, w.h), pointer).unwrap_or_else(|e| {
+    let els = atspi::clickable_elements(w.pid, &w.title, (w.w, w.h)).unwrap_or_else(|e| {
         eprintln!("atspi: {e}");
         Vec::new()
     });
