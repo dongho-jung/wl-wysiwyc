@@ -16,3 +16,4 @@ cargo build --release
 - [Usage](docs/usage.md)
 - [Configuration](docs/configuration.md)
 - [How it works, setup, debugging, and limitations](docs/how-it-works.md)
+- [Wayland alternatives and trade-offs](docs/alternatives.md)
